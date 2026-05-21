@@ -100,7 +100,7 @@ function App() {
           <div className="brand-mark">M</div>
           <div>
             <h1>Mercury</h1>
-            <p>Local-first AI Reader</p>
+            <p>AI Reader</p>
           </div>
         </div>
 

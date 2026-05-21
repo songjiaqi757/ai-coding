@@ -1,11 +1,9 @@
 # Privacy
 
-Mercury 是本地优先应用。
-
-## Local-first Rules
+## Privacy Rules
 
 - 用户无需注册登录。
-- Feed、文章、摘要、翻译、设置默认保存在本地。
+- Feed、文章、摘要、翻译和设置由应用进行管理。
 - 应用不主动采集用户数据。
 - 应用不依赖自建云端服务。
 

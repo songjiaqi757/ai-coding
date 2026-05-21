@@ -2,11 +2,11 @@
 
 ## Project Name
 
-Mercury - Local-first AI Reader
+Mercury - AI Reader
 
 ## Project Goal
 
-构建一个本地优先、跨平台、模型中立的 AI 阅读器。
+构建一个跨平台、模型中立的 AI 阅读器。
 
 ## Must-have Features
 
