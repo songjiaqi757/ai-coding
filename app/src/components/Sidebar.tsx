@@ -112,15 +112,20 @@ export function Sidebar({
 
         <div className="feed-list">
           {[allFeed, ...feeds].map((feed) => (
-            <button
+            <div
               key={feed.id}
               className={
                 feed.id === selectedFeedId ? "feed-item active" : "feed-item"
               }
-              onClick={() => onSelectFeed(feed.id)}
             >
-              <span className="feed-title">{feed.title}</span>
-              <div className="feed-right">
+              <button
+                className="feed-title"
+                style={{ flex: 1, background: "none", border: "none", cursor: "pointer", padding: 0 }}
+                onClick={() => onSelectFeed(feed.id)}
+              >
+                {feed.title}
+              </button>
+              <span className="feed-right">
                 {feed.id !== "all" && (
                   <button
                     className="refresh-button"
@@ -131,8 +136,8 @@ export function Sidebar({
                   </button>
                 )}
                 {feed.unread > 0 && <span className="badge">{feed.unread}</span>}
-              </div>
-            </button>
+              </span>
+            </div>
           ))}
         </div>
       </section>
