@@ -3,25 +3,30 @@ use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
+use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Feed {
-    id: String,
-    title: String,
-    unread: i64,
+pub struct Feed {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub site_url: Option<String>,
+    pub unread: i64,
+    pub last_sync_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Article {
-    id: String,
-    feed_id: String,
-    title: String,
-    source: String,
-    published_at: String,
-    excerpt: String,
-    content: String,
+pub struct Article {
+    pub id: String,
+    pub feed_id: String,
+    pub title: String,
+    pub url: String,
+    pub author: Option<String>,
+    pub published_at: Option<String>,
+    pub excerpt: String,
+    pub content: String,
 }
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -36,7 +41,7 @@ fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir.join("mercury.db"))
 }
 
-fn open_database(app: &AppHandle) -> Result<Connection, String> {
+pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
     let path = database_path(app)?;
     let conn = Connection::open(path)
         .map_err(|error| format!("Failed to open SQLite database: {error}"))?;
@@ -51,25 +56,32 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS feeds (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            unread INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            id          TEXT PRIMARY KEY,
+            title       TEXT NOT NULL,
+            url         TEXT NOT NULL UNIQUE,
+            site_url    TEXT,
+            unread      INTEGER NOT NULL DEFAULT 0,
+            last_sync_at TEXT,
+            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS articles (
-            id TEXT PRIMARY KEY,
-            feed_id TEXT NOT NULL,
-            title TEXT NOT NULL,
-            source TEXT NOT NULL,
-            published_at TEXT NOT NULL,
-            excerpt TEXT NOT NULL,
-            content TEXT NOT NULL,
-            read_status INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(feed_id) REFERENCES feeds(id)
+            id           TEXT PRIMARY KEY,
+            feed_id      TEXT NOT NULL,
+            title        TEXT NOT NULL,
+            url          TEXT NOT NULL,
+            guid         TEXT,
+            author       TEXT,
+            published_at TEXT,
+            excerpt      TEXT NOT NULL DEFAULT '',
+            content      TEXT NOT NULL DEFAULT '',
+            raw_html     TEXT,
+            read_status  INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(feed_id) REFERENCES feeds(id),
+            UNIQUE(feed_id, url)
         );
         ",
     )
@@ -78,91 +90,147 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn seed_database(conn: &Connection) -> Result<(), String> {
-    let feed_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds", [], |row| row.get(0))
-        .map_err(|error| format!("Failed to count feeds: {error}"))?;
+fn seed_database(_conn: &Connection) -> Result<(), String> {
+    Ok(())
+}
 
-    if feed_count > 0 {
-        return Ok(());
+pub fn save_articles(
+    conn: &Connection,
+    feed_id: &str,
+    entries: Vec<feed_rs::model::Entry>,
+) -> Result<usize, String> {
+    let mut saved = 0;
+
+    for entry in entries {
+        let url = match entry.links.first() {
+            Some(link) => link.href.clone(),
+            None => continue,
+        };
+
+        let article_id = Uuid::new_v4().to_string();
+        let _guid = Some(entry.id.clone());
+        let title = entry
+            .title
+            .map(|t| t.content)
+            .unwrap_or_else(|| "无标题".to_string());
+        let author = entry.authors.first().map(|a| a.name.clone());
+        let published_at = entry.published.map(|dt| dt.to_rfc3339());
+
+        let excerpt = entry
+            .summary
+            .map(|s| s.content)
+            .or_else(|| {
+                entry
+                    .content
+                    .as_ref()
+                    .and_then(|c| c.body.as_ref())
+                    .map(|b| b.chars().take(200).collect())
+            })
+            .unwrap_or_default();
+
+        let content = entry
+            .content
+            .and_then(|c| c.body)
+            .unwrap_or_default();
+
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO articles
+                (id, feed_id, title, url, guid, author, published_at, excerpt, content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                article_id, feed_id, title, url, _guid,
+                author, published_at, excerpt, content
+            ],
+        );
+
+        if let Ok(1) = result {
+            saved += 1;
+        }
     }
 
+    Ok(saved)
+}
+
+#[tauri::command]
+async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
+    let response = reqwest::get(&url)
+        .await
+        .map_err(|e| format!("无法访问该 URL: {e}"))?;
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("读取响应失败: {e}"))?;
+
+    let parsed = feed_rs::parser::parse(bytes.as_ref())
+        .map_err(|e| format!("无法解析为 RSS/Atom/JSON Feed: {e}"))?;
+
+    let feed_id = Uuid::new_v4().to_string();
+    let title = parsed
+        .title
+        .map(|t| t.content)
+        .unwrap_or_else(|| "未命名订阅源".to_string());
+    let site_url = parsed.links.first().map(|l| l.href.clone());
+
+    let conn = open_database(&app)?;
     conn.execute(
-        "INSERT INTO feeds (id, title, unread) VALUES (?1, ?2, ?3)",
-        params!["tech", "Technology", 3],
+        "INSERT OR IGNORE INTO feeds (id, title, url, site_url) VALUES (?1, ?2, ?3, ?4)",
+        params![feed_id, title, url, site_url],
     )
-    .map_err(|error| format!("Failed to seed Technology feed: {error}"))?;
+    .map_err(|e| format!("保存订阅源失败: {e}"))?;
+
+    save_articles(&conn, &feed_id, parsed.entries)?;
+
+    let unread: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE feed_id = ?1 AND read_status = 0",
+            params![feed_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询未读数失败: {e}"))?;
+
+    Ok(Feed {
+        id: feed_id,
+        title,
+        url,
+        site_url,
+        unread,
+        last_sync_at: None,
+    })
+}
+
+#[tauri::command]
+async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, String> {
+    let conn = open_database(&app)?;
+
+    let feed_url: String = conn
+        .query_row(
+            "SELECT url FROM feeds WHERE id = ?1",
+            params![feed_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| format!("找不到 feed_id: {feed_id}"))?;
+
+    let response = reqwest::get(&feed_url)
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("读取失败: {e}"))?;
+    let parsed = feed_rs::parser::parse(bytes.as_ref())
+        .map_err(|e| format!("解析失败: {e}"))?;
+
+    save_articles(&conn, &feed_id, parsed.entries)?;
 
     conn.execute(
-        "INSERT INTO feeds (id, title, unread) VALUES (?1, ?2, ?3)",
-        params!["design", "Design", 2],
+        "UPDATE feeds SET last_sync_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?1",
+        params![feed_id],
     )
-    .map_err(|error| format!("Failed to seed Design feed: {error}"))?;
+    .map_err(|e| format!("更新同步时间失败: {e}"))?;
 
-    conn.execute(
-        "INSERT INTO feeds (id, title, unread) VALUES (?1, ?2, ?3)",
-        params!["ai", "AI Research", 2],
-    )
-    .map_err(|error| format!("Failed to seed AI feed: {error}"))?;
-
-    conn.execute(
-        "
-        INSERT INTO articles
-            (id, feed_id, title, source, published_at, excerpt, content)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ",
-        params![
-            "a1",
-            "ai",
-            "Local-first AI apps are becoming practical",
-            "AI Weekly",
-            "Today",
-            "A new wave of AI tools keeps data local while allowing users to connect their own model providers.",
-            "Local-first AI applications combine private local storage with optional model providers. This architecture allows users to keep their reading data, summaries, translations, and preferences on their own device. When an AI feature is triggered, the app can call a user-configured local or remote model provider without requiring a central server."
-        ],
-    )
-    .map_err(|error| format!("Failed to seed article a1: {error}"))?;
-
-    conn.execute(
-        "
-        INSERT INTO articles
-            (id, feed_id, title, source, published_at, excerpt, content)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ",
-        params![
-            "a2",
-            "tech",
-            "Why desktop apps still matter",
-            "Software Notes",
-            "Yesterday",
-            "For tools that manage personal data, a desktop app can offer better privacy and reliability than a cloud-only web app.",
-            "Desktop applications remain useful for privacy-sensitive workflows. They can run without accounts, store data locally, and continue working even when network services are unavailable. For a reader application, this means feeds, articles, cleaned content, summaries, and translations can remain under the user's control."
-        ],
-    )
-    .map_err(|error| format!("Failed to seed article a2: {error}"))?;
-
-    conn.execute(
-        "
-        INSERT INTO articles
-            (id, feed_id, title, source, published_at, excerpt, content)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ",
-        params![
-            "a3",
-            "design",
-            "Designing a calm reading interface",
-            "Interface Lab",
-            "May 21",
-            "A good reader should reduce visual noise and make the article itself the primary focus.",
-            "Reader interfaces benefit from simple layouts, consistent spacing, readable typography, and clear hierarchy. A three-column layout can separate navigation, article selection, and reading without overwhelming the user."
-        ],
-    )
-    .map_err(|error| format!("Failed to seed article a3: {error}"))?;
-
-    Ok(())
+    list_articles_by_feed(&conn, Some(&feed_id))
 }
 
 #[tauri::command]
@@ -170,70 +238,118 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
     let conn = open_database(&app)?;
 
     let mut stmt = conn
-        .prepare("SELECT id, title, unread FROM feeds ORDER BY title ASC")
-        .map_err(|error| format!("Failed to prepare feeds query: {error}"))?;
+        .prepare(
+            "SELECT f.id, f.title, f.url, f.site_url, f.last_sync_at,
+                    COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread
+             FROM feeds f
+             LEFT JOIN articles a ON a.feed_id = f.id
+             GROUP BY f.id
+             ORDER BY f.title ASC",
+        )
+        .map_err(|e| format!("准备查询失败: {e}"))?;
 
     let rows = stmt
         .query_map([], |row| {
             Ok(Feed {
                 id: row.get(0)?,
                 title: row.get(1)?,
-                unread: row.get(2)?,
+                url: row.get(2)?,
+                site_url: row.get(3)?,
+                last_sync_at: row.get(4)?,
+                unread: row.get(5)?,
             })
         })
-        .map_err(|error| format!("Failed to query feeds: {error}"))?;
+        .map_err(|e| format!("查询失败: {e}"))?;
 
     let mut feeds = Vec::new();
-
     for row in rows {
-        feeds.push(row.map_err(|error| format!("Failed to read feed row: {error}"))?);
+        feeds.push(row.map_err(|e| format!("读取行失败: {e}"))?);
     }
-
     Ok(feeds)
 }
 
 #[tauri::command]
-fn list_articles(app: AppHandle) -> Result<Vec<Article>, String> {
+fn list_articles(app: AppHandle, feed_id: Option<String>) -> Result<Vec<Article>, String> {
     let conn = open_database(&app)?;
-
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT id, feed_id, title, source, published_at, excerpt, content
-            FROM articles
-            ORDER BY created_at ASC
-            ",
-        )
-        .map_err(|error| format!("Failed to prepare articles query: {error}"))?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(Article {
-                id: row.get(0)?,
-                feed_id: row.get(1)?,
-                title: row.get(2)?,
-                source: row.get(3)?,
-                published_at: row.get(4)?,
-                excerpt: row.get(5)?,
-                content: row.get(6)?,
-            })
-        })
-        .map_err(|error| format!("Failed to query articles: {error}"))?;
-
-    let mut articles = Vec::new();
-
-    for row in rows {
-        articles.push(row.map_err(|error| format!("Failed to read article row: {error}"))?);
-    }
-
-    Ok(articles)
+    list_articles_by_feed(&conn, feed_id.as_deref())
 }
+
+fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec<Article>, String> {
+    let (sql, param): (String, Option<String>) = match feed_id {
+        Some(id) => (
+            "SELECT id, feed_id, title, url, author, published_at, excerpt, content
+             FROM articles WHERE feed_id = ?1
+             ORDER BY published_at DESC, created_at DESC".to_string(),
+            Some(id.to_string()),
+        ),
+        None => (
+            "SELECT id, feed_id, title, url, author, published_at, excerpt, content
+             FROM articles
+             ORDER BY published_at DESC, created_at DESC".to_string(),
+            None,
+        ),
+    };
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("准备查询失败: {e}"))?;
+
+    let rows: Vec<Article> = match param {
+        Some(p) => {
+            let mut result = Vec::new();
+            let rows = stmt.query_map(params![p], |row| {
+                Ok(Article {
+                    id: row.get(0)?,
+                    feed_id: row.get(1)?,
+                    title: row.get(2)?,
+                    url: row.get(3)?,
+                    author: row.get(4)?,
+                    published_at: row.get(5)?,
+                    excerpt: row.get(6)?,
+                    content: row.get(7)?,
+                })
+            }).map_err(|e| format!("查询失败: {e}"))?;
+            for row in rows {
+                result.push(row.map_err(|e| format!("读取行失败: {e}"))?);
+            }
+            result
+        }
+        None => {
+            let mut result = Vec::new();
+            let rows = stmt.query_map([], |row| {
+                Ok(Article {
+                    id: row.get(0)?,
+                    feed_id: row.get(1)?,
+                    title: row.get(2)?,
+                    url: row.get(3)?,
+                    author: row.get(4)?,
+                    published_at: row.get(5)?,
+                    excerpt: row.get(6)?,
+                    content: row.get(7)?,
+                })
+            }).map_err(|e| format!("查询失败: {e}"))?;
+            for row in rows {
+                result.push(row.map_err(|e| format!("读取行失败: {e}"))?);
+            }
+            result
+        }
+    };
+
+    Ok(rows)
+}
+
+// mod opml;  // TODO: 取消注释 when Person C submits opml.rs
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![list_feeds, list_articles])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            list_feeds,
+            list_articles,
+            add_feed,
+            refresh_feed,
+            // crate::opml::import_opml,  // TODO: 取消注释 when Person C submits opml.rs
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
