@@ -1,5 +1,8 @@
+mod llm_provider;
+
+use llm_provider::LlmConfig;
 use rusqlite::{params, Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -22,6 +25,8 @@ struct Article {
     published_at: String,
     excerpt: String,
     content: String,
+    summary: Option<String>,
+    translation: Option<String>,
 }
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -67,13 +72,29 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             excerpt TEXT NOT NULL,
             content TEXT NOT NULL,
             read_status INTEGER NOT NULL DEFAULT 0,
+            summary TEXT,
+            translation TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(feed_id) REFERENCES feeds(id)
         );
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         ",
     )
     .map_err(|error| format!("Failed to initialize database schema: {error}"))?;
+
+    // Migration: add columns to existing databases that lack them
+    let migrations = [
+        "ALTER TABLE articles ADD COLUMN summary TEXT",
+        "ALTER TABLE articles ADD COLUMN translation TEXT",
+    ];
+    for sql in &migrations {
+        let _ = conn.execute(sql, []);
+    }
 
     Ok(())
 }
@@ -165,6 +186,37 @@ fn seed_database(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn load_setting_value(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .map(Some)
+    .or_else(|e| {
+        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+            Ok(None)
+        } else {
+            Err(format!("Failed to load setting '{key}': {e}"))
+        }
+    })
+}
+
+fn get_llm_config_from_db(conn: &Connection) -> Result<LlmConfig, String> {
+    let base_url = load_setting_value(conn, "llm_base_url")?
+        .ok_or("LLM Base URL not configured. Please set it in Settings.".to_string())?;
+    let api_key = load_setting_value(conn, "llm_api_key")?
+        .ok_or("LLM API Key not configured. Please set it in Settings.".to_string())?;
+    let model_name = load_setting_value(conn, "llm_model_name")?
+        .ok_or("LLM Model Name not configured. Please set it in Settings.".to_string())?;
+
+    Ok(LlmConfig {
+        base_url,
+        api_key,
+        model_name,
+    })
+}
+
 #[tauri::command]
 fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
     let conn = open_database(&app)?;
@@ -199,7 +251,8 @@ fn list_articles(app: AppHandle) -> Result<Vec<Article>, String> {
     let mut stmt = conn
         .prepare(
             "
-            SELECT id, feed_id, title, source, published_at, excerpt, content
+            SELECT id, feed_id, title, source, published_at, excerpt, content,
+                   summary, translation
             FROM articles
             ORDER BY created_at ASC
             ",
@@ -216,6 +269,8 @@ fn list_articles(app: AppHandle) -> Result<Vec<Article>, String> {
                 published_at: row.get(4)?,
                 excerpt: row.get(5)?,
                 content: row.get(6)?,
+                summary: row.get(7)?,
+                translation: row.get(8)?,
             })
         })
         .map_err(|error| format!("Failed to query articles: {error}"))?;
@@ -229,11 +284,152 @@ fn list_articles(app: AppHandle) -> Result<Vec<Article>, String> {
     Ok(articles)
 }
 
+#[tauri::command]
+fn save_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
+    let conn = open_database(&app)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )
+    .map_err(|error| format!("Failed to save setting: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_setting(app: AppHandle, key: String) -> Result<Option<String>, String> {
+    let conn = open_database(&app)?;
+    load_setting_value(&conn, &key)
+}
+
+#[tauri::command]
+fn get_llm_config(app: AppHandle) -> Result<LlmConfig, String> {
+    let conn = open_database(&app)?;
+    get_llm_config_from_db(&conn)
+}
+
+#[tauri::command]
+fn summarize_article(app: AppHandle, article_id: String, force: Option<bool>) -> Result<String, String> {
+    let conn = open_database(&app)?;
+
+    // Return cached summary unless force is true
+    if force != Some(true) {
+        let cached: Option<String> = conn
+            .query_row(
+                "SELECT summary FROM articles WHERE id = ?1",
+                params![article_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+
+        if let Some(ref s) = cached {
+            if !s.is_empty() {
+                return Ok(s.clone());
+            }
+        }
+    }
+
+    let content: String = conn
+        .query_row(
+            "SELECT content FROM articles WHERE id = ?1",
+            params![article_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Article not found: {e}"))?;
+
+    let config = get_llm_config_from_db(&conn)?;
+    let prompt = format!(
+        "Please provide a concise summary of the following article in 2-3 sentences:\n\n{}",
+        content
+    );
+    let summary = llm_provider::call_llm(
+        &config,
+        "You are a helpful assistant that summarizes articles concisely.",
+        &prompt,
+    )?;
+
+    conn.execute(
+        "UPDATE articles SET summary = ?1 WHERE id = ?2",
+        params![summary, article_id],
+    )
+    .map_err(|e| format!("Failed to save summary: {e}"))?;
+
+    Ok(summary)
+}
+
+#[tauri::command]
+fn translate_article(app: AppHandle, article_id: String, target_lang: String) -> Result<String, String> {
+    let conn = open_database(&app)?;
+
+    // Return cached translation
+    let cached: Option<String> = conn
+        .query_row(
+            "SELECT translation FROM articles WHERE id = ?1",
+            params![article_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    if let Some(ref s) = cached {
+        if !s.is_empty() {
+            return Ok(s.clone());
+        }
+    }
+
+    let content: String = conn
+        .query_row(
+            "SELECT content FROM articles WHERE id = ?1",
+            params![article_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Article not found: {e}"))?;
+
+    let config = get_llm_config_from_db(&conn)?;
+
+    let lang_name = match target_lang.as_str() {
+        "zh" => "Chinese",
+        "en" => "English",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        _ => &target_lang,
+    };
+
+    let prompt = format!(
+        "Please translate the following article into {}. Preserve the original meaning and tone:\n\n{}",
+        lang_name, content
+    );
+    let translation = llm_provider::call_llm(
+        &config,
+        &format!("You are a professional translator. Translate the user's text into {}.", lang_name),
+        &prompt,
+    )?;
+
+    conn.execute(
+        "UPDATE articles SET translation = ?1 WHERE id = ?2",
+        params![translation, article_id],
+    )
+    .map_err(|e| format!("Failed to save translation: {e}"))?;
+
+    Ok(translation)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![list_feeds, list_articles])
+        .invoke_handler(tauri::generate_handler![
+            list_feeds,
+            list_articles,
+            save_setting,
+            load_setting,
+            get_llm_config,
+            summarize_article,
+            translate_article,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

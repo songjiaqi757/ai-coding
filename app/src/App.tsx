@@ -16,7 +16,11 @@ type Article = {
   publishedAt: string;
   excerpt: string;
   content: string;
+  summary?: string;
+  translation?: string;
 };
+
+type ReadView = "original" | "translation" | "bilingual";
 
 function App() {
   const [feeds, setFeeds] = useState<Feed[]>([]);
@@ -25,6 +29,16 @@ function App() {
   const [selectedArticleId, setSelectedArticleId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // AI feature states
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsForm, setSettingsForm] = useState({ baseUrl: "", apiKey: "", modelName: "" });
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [readView, setReadView] = useState<ReadView>("original");
+  const [targetLang, setTargetLang] = useState("zh");
 
   async function loadLocalData() {
     try {
@@ -52,6 +66,84 @@ function App() {
   useEffect(() => {
     void loadLocalData();
   }, []);
+
+  async function loadSettings() {
+    try {
+      const [baseUrl, apiKey, modelName] = await Promise.all([
+        invoke<string | null>("load_setting", { key: "llm_base_url" }),
+        invoke<string | null>("load_setting", { key: "llm_api_key" }),
+        invoke<string | null>("load_setting", { key: "llm_model_name" }),
+      ]);
+      setSettingsForm({
+        baseUrl: baseUrl ?? "",
+        apiKey: apiKey ?? "",
+        modelName: modelName ?? "",
+      });
+    } catch {
+      // Settings not configured yet
+    }
+  }
+
+  useEffect(() => {
+    if (showSettings) {
+      void loadSettings();
+    }
+  }, [showSettings]);
+
+  async function handleSaveSettings() {
+    try {
+      setIsSavingSettings(true);
+      await Promise.all([
+        invoke("save_setting", { key: "llm_base_url", value: settingsForm.baseUrl }),
+        invoke("save_setting", { key: "llm_api_key", value: settingsForm.apiKey }),
+        invoke("save_setting", { key: "llm_model_name", value: settingsForm.modelName }),
+      ]);
+      setShowSettings(false);
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSavingSettings(false);
+    }
+  }
+
+  async function handleSummarize(force = false) {
+    if (!selectedArticleId) return;
+    try {
+      setIsSummarizing(true);
+      setAiError(null);
+      const summary = await invoke<string>("summarize_article", {
+        articleId: selectedArticleId,
+        force,
+      });
+      setArticles((prev) =>
+        prev.map((a) => (a.id === selectedArticleId ? { ...a, summary } : a)),
+      );
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSummarizing(false);
+    }
+  }
+
+  async function handleTranslate() {
+    if (!selectedArticleId) return;
+    try {
+      setIsTranslating(true);
+      setAiError(null);
+      const translation = await invoke<string>("translate_article", {
+        articleId: selectedArticleId,
+        targetLang,
+      });
+      setArticles((prev) =>
+        prev.map((a) => (a.id === selectedArticleId ? { ...a, translation } : a)),
+      );
+      setReadView("translation");
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsTranslating(false);
+    }
+  }
 
   const allFeed: Feed = useMemo(
     () => ({
@@ -130,6 +222,9 @@ function App() {
             <li>Summary Agent</li>
             <li>Translation Agent</li>
           </ul>
+          <button className="settings-btn" onClick={() => setShowSettings(true)}>
+            <span className="settings-icon">&#9881;</span> Settings
+          </button>
         </section>
       </aside>
 
@@ -171,6 +266,9 @@ function App() {
               </div>
               <h3>{article.title}</h3>
               <p>{article.excerpt}</p>
+              {article.summary && (
+                <p className="card-summary-indicator">Has summary</p>
+              )}
             </button>
           ))}
         </div>
@@ -189,30 +287,92 @@ function App() {
               </div>
 
               <div className="reader-actions">
-                <button onClick={() => alert("Summary Agent is coming next.")}>
-                  Summary
+                <button
+                  onClick={() => handleSummarize()}
+                  disabled={isSummarizing}
+                  className={isSummarizing ? "action-loading" : ""}
+                >
+                  {isSummarizing ? "Summarizing..." : selectedArticle.summary ? "Regenerate Summary" : "Summary"}
                 </button>
                 <button
-                  onClick={() => alert("Translation Agent is coming next.")}
+                  onClick={() => handleTranslate()}
+                  disabled={isTranslating}
+                  className={isTranslating ? "action-loading" : ""}
                 >
-                  Translate
+                  {isTranslating ? "Translating..." : "Translate"}
                 </button>
+                <select
+                  className="lang-select"
+                  value={targetLang}
+                  onChange={(e) => setTargetLang(e.target.value)}
+                >
+                  <option value="zh">Chinese</option>
+                  <option value="en">English</option>
+                  <option value="ja">Japanese</option>
+                  <option value="ko">Korean</option>
+                </select>
               </div>
             </div>
 
+            {aiError && <div className="error-box">{aiError}</div>}
+
+            {/* Summary section */}
+            {selectedArticle.summary && (
+              <div className="ai-result-section">
+                <div className="ai-result-label">Summary</div>
+                <div className="ai-result-content">{selectedArticle.summary}</div>
+              </div>
+            )}
+
+            {/* View tabs */}
+            {selectedArticle.translation && (
+              <div className="view-tabs">
+                <button
+                  className={readView === "original" ? "view-tab active" : "view-tab"}
+                  onClick={() => setReadView("original")}
+                >
+                  Original
+                </button>
+                <button
+                  className={readView === "translation" ? "view-tab active" : "view-tab"}
+                  onClick={() => setReadView("translation")}
+                >
+                  Translation
+                </button>
+                <button
+                  className={readView === "bilingual" ? "view-tab active" : "view-tab"}
+                  onClick={() => setReadView("bilingual")}
+                >
+                  Bilingual
+                </button>
+              </div>
+            )}
+
             <div className="reader-content">
-              <p>{selectedArticle.content}</p>
+              {(readView === "original" || readView === "bilingual") && (
+                <p>{selectedArticle.content}</p>
+              )}
 
-              <h3>Local data milestone</h3>
-              <p>
-                This article is now loaded from the local SQLite database through
-                Tauri commands instead of being hard-coded in the React UI.
-              </p>
+              {(readView === "original" || readView === "bilingual") && (
+                <>
+                  <h3>Local data milestone</h3>
+                  <p>
+                    This article is now loaded from the local SQLite database through
+                    Tauri commands instead of being hard-coded in the React UI.
+                  </p>
+                  <blockquote>
+                    Next step: add real Feed / OPML parsing and store fetched
+                    articles into the same local database.
+                  </blockquote>
+                </>
+              )}
 
-              <blockquote>
-                Next step: add real Feed / OPML parsing and store fetched
-                articles into the same local database.
-              </blockquote>
+              {(readView === "translation" || readView === "bilingual") && selectedArticle.translation && (
+                <div className="translation-block">
+                  <h3>Translation</h3>
+                  <p>{selectedArticle.translation}</p>
+                </div>
+              )}
             </div>
           </>
         ) : (
@@ -221,6 +381,55 @@ function App() {
           </div>
         )}
       </article>
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h2>LLM Settings</h2>
+            <p className="modal-desc">
+              Configure your LLM provider. Supports OpenAI, DeepSeek, Ollama, and any OpenAI-compatible API.
+            </p>
+
+            <div className="settings-form">
+              <label>
+                API Base URL
+                <input
+                  placeholder="https://api.openai.com or http://localhost:11434"
+                  value={settingsForm.baseUrl}
+                  onChange={(e) => setSettingsForm((f) => ({ ...f, baseUrl: e.target.value }))}
+                />
+              </label>
+
+              <label>
+                API Key
+                <input
+                  type="password"
+                  placeholder="sk-... (leave empty for Ollama)"
+                  value={settingsForm.apiKey}
+                  onChange={(e) => setSettingsForm((f) => ({ ...f, apiKey: e.target.value }))}
+                />
+              </label>
+
+              <label>
+                Model Name
+                <input
+                  placeholder="gpt-3.5-turbo, deepseek-chat, llama3"
+                  value={settingsForm.modelName}
+                  onChange={(e) => setSettingsForm((f) => ({ ...f, modelName: e.target.value }))}
+                />
+              </label>
+
+              <div className="modal-actions">
+                <button className="primary-button" onClick={handleSaveSettings} disabled={isSavingSettings}>
+                  {isSavingSettings ? "Saving..." : "Save"}
+                </button>
+                <button onClick={() => setShowSettings(false)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
