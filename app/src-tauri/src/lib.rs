@@ -1,63 +1,14 @@
-use dom_query::Document;
-use reqwest::{Client, Url};
+use reqwest::Client;
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
-const BLOCKED_SELECTORS: &[&str] = &[
-    "script",
-    "style",
-    "iframe",
-    "object",
-    "embed",
-    "form",
-    "noscript",
-    "nav",
-    "footer",
-    "aside",
-    "svg",
-];
-
-const CONTENT_SELECTORS: &[&str] = &[
-    "article",
-    ".entryPage",
-    ".entry",
-    "main",
-    ".sl-markdown-content",
-    ".content-panel",
-    "[data-pagefind-body]",
-    "[role='main']",
-    ".content",
-    ".article",
-    ".post",
-    ".entry-content",
-    ".article-content",
-    ".post-content",
-];
-
-const NOISE_KEYWORDS: &[&str] = &[
-    "ad",
-    "advert",
-    "ads",
-    "recommend",
-    "related",
-    "comment",
-    "share",
-    "sidebar",
-    "footer",
-    "nav",
-    "sponsor",
-    "sponsored",
-    "toc",
-    "popup",
-    "login",
-];
-
-const SAFE_ATTRS: &[&str] = &["href", "src", "alt", "title", "colspan", "rowspan"];
-const DEMO_ARTICLES: &[(&str, &str, &str, &str, &str, &str, &str)] = &[
+const DEMO_ARTICLES: &[(&str, &str, &str, &str, &str, &str, &str, Option<&str>)] = &[
     (
         "a1",
         "ai",
@@ -66,15 +17,17 @@ const DEMO_ARTICLES: &[(&str, &str, &str, &str, &str, &str, &str)] = &[
         "Mar 27, 2026",
         "A Simon Willison post about trying vibe coding workflows with SwiftUI.",
         "https://simonwillison.net/2026/Mar/27/vibe-coding-swiftui/",
+        Some("Simon Willison"),
     ),
     (
         "a2",
         "tech",
-        "The science of slowing down",
-        "Psychology Today",
-        "Sep 2025",
-        "An article about the cognitive and health science behind slowing down.",
-        "https://www.psychologytoday.com/us/blog/heart-of-healthcare/202509/the-science-of-slowing-down",
+        "Power Apps Vibe Coding Overview",
+        "Microsoft Learn",
+        "May 2026",
+        "An overview of the vibe coding workflow in Microsoft Power Apps.",
+        "https://learn.microsoft.com/en-us/power-apps/vibe/overview",
+        Some("Microsoft Learn"),
     ),
     (
         "a3",
@@ -84,6 +37,7 @@ const DEMO_ARTICLES: &[(&str, &str, &str, &str, &str, &str, &str)] = &[
         "Mar 1, 2023",
         "A Tauri post about mobile support, template simplification, and onboarding improvements.",
         "https://v2.tauri.app/blog/create-tauri-app-version-3-released/",
+        Some("Amr Bashir"),
     ),
     (
         "a4",
@@ -93,6 +47,7 @@ const DEMO_ARTICLES: &[(&str, &str, &str, &str, &str, &str, &str)] = &[
         "Aug 1, 2024",
         "A long-form update on the road to Tauri 2.0 stable and the release candidate milestone.",
         "https://v2.tauri.app/blog/tauri-2-0-0-release-candidate/",
+        Some("Tauri Team"),
     ),
     (
         "a5",
@@ -102,8 +57,10 @@ const DEMO_ARTICLES: &[(&str, &str, &str, &str, &str, &str, &str)] = &[
         "Nov 28, 2024",
         "Rust 1.83.0 continues the stable release cadence with language and tooling improvements.",
         "https://blog.rust-lang.org/2024/11/28/Rust-1.83.0/",
+        Some("Rust Core Team"),
     ),
 ];
+const CLEANER_VERSION: &str = "node-readability-v4";
 
 #[derive(Debug, Serialize, Clone)]
 struct Feed {
@@ -133,6 +90,21 @@ struct Article {
     content: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct NodeCleanerInput {
+    html: String,
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeCleanerOutput {
+    title: Option<String>,
+    byline: Option<String>,
+    excerpt: Option<String>,
+    cleaned_html: Option<String>,
+    cleaned_markdown: Option<String>,
+}
+
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     let app_data_dir = app
         .path()
@@ -159,32 +131,71 @@ fn open_database(app: &AppHandle) -> Result<Connection, String> {
 }
 
 fn sync_demo_articles(conn: &Connection) -> Result<(), String> {
-    for (article_id, feed_id, title, source, published_at, excerpt, url) in DEMO_ARTICLES {
+    for (article_id, feed_id, title, source, published_at, excerpt, url, author) in DEMO_ARTICLES {
+        let previous_state = conn
+            .query_row(
+                "SELECT url, cleaner_version FROM articles WHERE id = ?1",
+                [article_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("Failed to read demo article {article_id}: {error}"))?;
+
         conn.execute(
             "
             INSERT INTO articles (
                 id, feed_id, title, source, published_at, excerpt, content, url, author
             )
-            SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, 'Demo Source'
+            SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8
             WHERE NOT EXISTS (SELECT 1 FROM articles WHERE id = ?1)
             ",
-            params![article_id, feed_id, title, source, published_at, excerpt, url],
+            params![article_id, feed_id, title, source, published_at, excerpt, url, author],
         )
         .map_err(|error| format!("Failed to insert demo article {article_id}: {error}"))?;
+
+        let previous_url = previous_state
+            .as_ref()
+            .and_then(|(existing_url, _)| existing_url.as_deref());
+        let previous_cleaner_version = previous_state
+            .as_ref()
+            .and_then(|(_, cleaner_version)| cleaner_version.as_deref());
+        let reset_cache = previous_url.is_some_and(|existing_url| existing_url != *url)
+            || previous_cleaner_version != Some(CLEANER_VERSION);
 
         conn.execute(
             "
             UPDATE articles
             SET
-                title = ?2,
-                source = ?3,
-                published_at = ?4,
-                excerpt = ?5,
-                url = ?6,
+                feed_id = ?2,
+                title = ?3,
+                source = ?4,
+                published_at = ?5,
+                excerpt = ?6,
+                url = ?7,
+                author = CASE WHEN ?8 IS NOT NULL THEN ?8 ELSE author END,
+                raw_html = CASE WHEN ?9 THEN NULL ELSE raw_html END,
+                cleaned_html = CASE WHEN ?9 THEN NULL ELSE cleaned_html END,
+                cleaned_markdown = CASE WHEN ?9 THEN NULL ELSE cleaned_markdown END,
+                cleaner_version = CASE WHEN ?9 THEN NULL ELSE cleaner_version END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?1
             ",
-            params![article_id, title, source, published_at, excerpt, url],
+            params![
+                article_id,
+                feed_id,
+                title,
+                source,
+                published_at,
+                excerpt,
+                url,
+                author,
+                reset_cache
+            ],
         )
         .map_err(|error| format!("Failed to sync demo article {article_id}: {error}"))?;
     }
@@ -233,6 +244,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
     ensure_column(conn, "articles", "raw_html TEXT")?;
     ensure_column(conn, "articles", "cleaned_html TEXT")?;
     ensure_column(conn, "articles", "cleaned_markdown TEXT")?;
+    ensure_column(conn, "articles", "cleaner_version TEXT")?;
     ensure_column(conn, "articles", "summary TEXT")?;
     ensure_column(conn, "articles", "translation TEXT")?;
 
@@ -314,69 +326,6 @@ fn seed_database(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|error| format!("Failed to seed AI feed: {error}"))?;
 
-    conn.execute(
-        "
-        INSERT INTO articles
-            (id, feed_id, title, source, published_at, excerpt, content, url, author)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-        ",
-        params![
-            "a1",
-            "ai",
-            "Vibe coding in SwiftUI",
-            "Simon Willison's Weblog",
-            "Mar 27, 2026",
-            "A Simon Willison post about trying vibe coding workflows with SwiftUI.",
-            "Local-first AI applications combine private local storage with optional model providers. This architecture allows users to keep their reading data, summaries, translations, and preferences on their own device. When an AI feature is triggered, the app can call a user-configured local or remote model provider without requiring a central server.",
-            Some("https://simonwillison.net/2026/Mar/27/vibe-coding-swiftui/".to_string()),
-            Some("Simon Willison".to_string())
-        ],
-    )
-    .map_err(|error| format!("Failed to seed article a1: {error}"))?;
-
-    conn.execute(
-        "
-        INSERT INTO articles
-            (id, feed_id, title, source, published_at, excerpt, content, url, author)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-        ",
-        params![
-            "a2",
-            "tech",
-            "The science of slowing down",
-            "Psychology Today",
-            "Sep 2025",
-            "An article about the cognitive and health science behind slowing down.",
-            "Desktop applications remain useful for privacy-sensitive workflows. They can run without accounts, store data locally, and continue working even when network services are unavailable. For a reader application, this means feeds, articles, cleaned content, summaries, and translations can remain under the user's control.",
-            Some("https://www.psychologytoday.com/us/blog/heart-of-healthcare/202509/the-science-of-slowing-down".to_string()),
-            Some("Psychology Today".to_string())
-        ],
-    )
-    .map_err(|error| format!("Failed to seed article a2: {error}"))?;
-
-    conn.execute(
-        "
-        INSERT INTO articles
-            (id, feed_id, title, source, published_at, excerpt, content, url, author)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-        ",
-        params![
-            "a3",
-            "design",
-            "Designing a calm reading interface",
-            "Interface Lab",
-            "May 21",
-            "A good reader should reduce visual noise and make the article itself the primary focus.",
-            "Reader interfaces benefit from simple layouts, consistent spacing, readable typography, and clear hierarchy. A three-column layout can separate navigation, article selection, and reading without overwhelming the user.",
-            Some("https://v2.tauri.app/blog/create-tauri-app-version-3-released/".to_string()),
-            Some("Lina Zhou".to_string())
-        ],
-    )
-    .map_err(|error| format!("Failed to seed article a3: {error}"))?;
-
     Ok(())
 }
 
@@ -444,16 +393,15 @@ fn safe_fetchable_url(url: &str) -> bool {
     normalized.starts_with("http://") || normalized.starts_with("https://")
 }
 
-fn safe_content_url(url: &str) -> bool {
-    let normalized = url.trim().to_ascii_lowercase();
-    !(normalized.starts_with("javascript:")
-        || normalized.starts_with("vbscript:")
-        || normalized.starts_with("data:text/html"))
-}
-
-fn contains_noise_keyword(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase();
-    NOISE_KEYWORDS.iter().any(|keyword| normalized.contains(keyword))
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|inner| {
+        let trimmed = inner.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
 }
 
 fn escape_html(input: &str) -> String {
@@ -484,207 +432,58 @@ fn fallback_html_from_article(article: &Article) -> String {
     format!("<article>{}</article>", blocks.join("\n"))
 }
 
-fn content_score(node_html: &str) -> i64 {
-    let candidate = Document::fragment(node_html);
-    let text = candidate.formatted_text().to_string();
-    let text_len = text.trim().chars().count() as i64;
-    let paragraph_count = candidate.select("p").length() as i64;
-    let heading_count = candidate.select("h1, h2, h3").length() as i64;
-    let link_text_len = candidate
-        .select("a")
-        .iter()
-        .map(|node| node.text().chars().count() as i64)
-        .sum::<i64>();
-
-    text_len + paragraph_count * 120 + heading_count * 80 - link_text_len * 2
+fn node_script_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("scripts")
+        .join("article-cleaner.mjs")
 }
 
-fn select_best_content_html(doc: &Document) -> String {
-    for selector in CONTENT_SELECTORS {
-        let mut best_html = String::new();
-        let mut best_score = i64::MIN;
+async fn run_node_cleaner(
+    html: String,
+    url: Option<String>,
+) -> Result<NodeCleanerOutput, String> {
+    let script_path = node_script_path();
 
-        for node in doc.select(selector).iter() {
-            let html = node.html().to_string();
-            let score = content_score(&html);
-            if score > best_score {
-                best_score = score;
-                best_html = html;
-            }
-        }
+    tauri::async_runtime::spawn_blocking(move || {
+        let payload = serde_json::to_vec(&NodeCleanerInput { html, url })
+            .map_err(|error| format!("Failed to serialize cleaner input: {error}"))?;
 
-        if !best_html.is_empty() && best_score > 200 {
-            return best_html;
-        }
-    }
+        let mut child = Command::new("node")
+            .arg(script_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Failed to start Node article cleaner: {error}"))?;
 
-    let mut best_html = String::new();
-    let mut best_score = i64::MIN;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Failed to open stdin for Node article cleaner".to_string())?;
+        stdin
+            .write_all(&payload)
+            .map_err(|error| format!("Failed to send HTML to Node article cleaner: {error}"))?;
+        drop(stdin);
 
-    for selector in ["body", "main", "article", "div"] {
-        for node in doc.select(selector).iter() {
-            let html = node.html().to_string();
-            let score = content_score(&html);
-            if score > best_score {
-                best_score = score;
-                best_html = html;
-            }
-        }
-    }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("Failed to wait for Node article cleaner: {error}"))?;
 
-    if best_html.is_empty() {
-        let body = doc.select("body");
-        if body.exists() {
-            return body.inner_html().to_string();
-        }
-        return doc.html().to_string();
-    }
-
-    best_html
-}
-
-fn remove_blocked_and_noisy_nodes(doc: &Document) {
-    for selector in BLOCKED_SELECTORS {
-        doc.select(selector).remove();
-    }
-
-    let nodes: Vec<_> = doc.select("*").iter().collect();
-    for node in nodes {
-        let mut should_remove = false;
-
-        for attr_name in ["class", "id", "role"] {
-            if let Some(value) = node.attr(attr_name) {
-                if contains_noise_keyword(value.as_ref()) {
-                    should_remove = true;
-                    break;
-                }
-            }
-        }
-
-        if should_remove && !node.is("article") && !node.is("main") && !node.is("body") {
-            node.remove();
-        }
-    }
-}
-
-fn normalize_resource_url(base_url: Option<&str>, value: &str) -> Option<String> {
-    if !safe_content_url(value) {
-        return None;
-    }
-
-    if let Ok(url) = Url::parse(value) {
-        return Some(url.to_string());
-    }
-
-    let base = Url::parse(base_url?).ok()?;
-    base.join(value).ok().map(|url| url.to_string())
-}
-
-fn flatten_heading_links(doc: &Document) {
-    for heading in doc.select("h1, h2, h3, h4, h5, h6").iter() {
-        let text = heading.text().trim().to_string();
-        if !text.is_empty() {
-            heading.set_text(&text);
-        }
-    }
-}
-
-fn extract_author(doc: &Document) -> Option<String> {
-    for selector in [
-        ".authors .name",
-        ".author .name",
-        ".byline .name",
-        "meta[name='author']",
-        "meta[property='article:author']",
-        "meta[name='twitter:creator']",
-        "[itemprop='author']",
-        "a[rel='author']",
-        ".byline",
-    ] {
-        for node in doc.select(selector).iter() {
-            if node.is("meta") {
-                if let Some(content) = node.attr("content") {
-                    let value = content.trim().trim_start_matches('@').to_string();
-                    if !value.is_empty() {
-                        return Some(value);
-                    }
-                }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                "Node article cleaner exited with an unknown error".to_string()
             } else {
-                let text = node.text().trim().trim_start_matches("By ").to_string();
-                if !text.is_empty() && text.len() <= 80 {
-                    return Some(text);
-                }
-            }
+                format!("Node article cleaner failed: {stderr}")
+            });
         }
-    }
 
-    None
-}
-
-fn sanitize_node_attrs(doc: &Document, base_url: Option<&str>) {
-    let nodes: Vec<_> = doc.select("*").iter().collect();
-
-    for node in nodes {
-        let attrs = node.attrs();
-
-        for attr in attrs {
-            let attr_name = attr.name.local.to_string();
-            let attr_value = attr.value.to_string();
-            let lower_name = attr_name.to_ascii_lowercase();
-
-            if lower_name.starts_with("on") || lower_name == "style" || lower_name == "srcset" {
-                node.remove_attr(&attr_name);
-                continue;
-            }
-
-            if !SAFE_ATTRS.contains(&lower_name.as_str()) {
-                node.remove_attr(&attr_name);
-                continue;
-            }
-
-            if matches!(lower_name.as_str(), "href" | "src") {
-                if let Some(normalized_url) = normalize_resource_url(base_url, &attr_value) {
-                    node.set_attr(&attr_name, &normalized_url);
-                } else {
-                    node.remove_attr(&attr_name);
-                }
-            }
-        }
-    }
-}
-
-fn clean_html(raw_html: &str, base_url: Option<&str>) -> Result<String, String> {
-    let raw_doc = Document::from(raw_html);
-    remove_blocked_and_noisy_nodes(&raw_doc);
-
-    let candidate_html = select_best_content_html(&raw_doc);
-    if candidate_html.trim().is_empty() {
-        return Err("Failed to extract article content from HTML".to_string());
-    }
-
-    let cleaned_doc = Document::fragment(candidate_html);
-    remove_blocked_and_noisy_nodes(&cleaned_doc);
-    flatten_heading_links(&cleaned_doc);
-    sanitize_node_attrs(&cleaned_doc, base_url);
-
-    let cleaned_html = cleaned_doc.html().to_string();
-    if cleaned_html.trim().is_empty() {
-        return Err("Article content was empty after cleaning".to_string());
-    }
-
-    Ok(cleaned_html)
-}
-
-fn html_to_markdown(cleaned_html: &str) -> Result<String, String> {
-    let doc = Document::fragment(cleaned_html);
-    let markdown = doc.md(Some(&[])).to_string();
-    let normalized = markdown.trim().to_string();
-
-    if normalized.is_empty() {
-        return Err("Failed to generate markdown from cleaned HTML".to_string());
-    }
-
-    Ok(normalized)
+        serde_json::from_slice::<NodeCleanerOutput>(&output.stdout)
+            .map_err(|error| format!("Failed to decode Node cleaner output: {error}"))
+    })
+    .await
+    .map_err(|error| format!("Node cleaner task failed: {error}"))?
 }
 
 async fn fetch_html(url: &str) -> Result<String, String> {
@@ -717,6 +516,9 @@ fn update_article_cleaning(
     raw_html: Option<&str>,
     cleaned_html: Option<&str>,
     cleaned_markdown: Option<&str>,
+    title: Option<&str>,
+    author: Option<&str>,
+    excerpt: Option<&str>,
 ) -> Result<(), String> {
     conn.execute(
         "
@@ -725,10 +527,23 @@ fn update_article_cleaning(
             raw_html = COALESCE(?2, raw_html),
             cleaned_html = COALESCE(?3, cleaned_html),
             cleaned_markdown = COALESCE(?4, cleaned_markdown),
+            title = COALESCE(?5, title),
+            author = COALESCE(?6, author),
+            excerpt = COALESCE(?7, excerpt),
+            cleaner_version = ?8,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?1
         ",
-        params![article_id, raw_html, cleaned_html, cleaned_markdown],
+        params![
+            article_id,
+            raw_html,
+            cleaned_html,
+            cleaned_markdown,
+            title,
+            author,
+            excerpt,
+            CLEANER_VERSION
+        ],
     )
     .map_err(|error| format!("Failed to save cleaned article: {error}"))?;
 
@@ -766,29 +581,29 @@ fn list_articles(app: AppHandle, feed_id: Option<String>) -> Result<Vec<Article>
     let conn = open_database(&app)?;
     let mut articles = Vec::new();
 
-    let sql = "
-        SELECT
-            id,
-            feed_id,
-            title,
-            url,
-            author,
-            published_at,
-            raw_html,
-            cleaned_html,
-            cleaned_markdown,
-            summary,
-            translation,
-            source,
-            excerpt,
-            content
-        FROM articles
-        WHERE (?1 IS NULL OR ?1 = '' OR feed_id = ?1)
-        ORDER BY created_at ASC
-    ";
-
     let mut stmt = conn
-        .prepare(sql)
+        .prepare(
+            "
+            SELECT
+                id,
+                feed_id,
+                title,
+                url,
+                author,
+                published_at,
+                raw_html,
+                cleaned_html,
+                cleaned_markdown,
+                summary,
+                translation,
+                source,
+                excerpt,
+                content
+            FROM articles
+            WHERE (?1 IS NULL OR ?1 = '' OR feed_id = ?1)
+            ORDER BY created_at ASC
+            ",
+        )
         .map_err(|error| format!("Failed to prepare articles query: {error}"))?;
 
     let rows = stmt
@@ -823,69 +638,61 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
         return Ok(initial_article);
     }
 
-    if let Some(existing_cleaned_html) = initial_article
-        .cleaned_html
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        let markdown = html_to_markdown(existing_cleaned_html)?;
-        let conn = open_database(&app)?;
-        update_article_cleaning(
-            &conn,
-            &article_id,
-            None,
-            Some(existing_cleaned_html),
-            Some(&markdown),
-        )?;
-        return load_article_by_id(&conn, &article_id);
-    }
-
-    let raw_html = if let Some(existing_raw_html) = initial_article
+    let raw_html_source = initial_article
         .raw_html
         .as_ref()
         .filter(|value| !value.trim().is_empty())
-    {
-        existing_raw_html.clone()
+        .cloned();
+
+    let cached_cleaned_html = initial_article
+        .cleaned_html
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned();
+
+    let (html_for_cleaning, raw_html_to_store) = if let Some(existing_raw_html) = raw_html_source {
+        (existing_raw_html.clone(), Some(existing_raw_html))
+    } else if let Some(existing_cleaned_html) = cached_cleaned_html.clone() {
+        (existing_cleaned_html, None)
     } else if let Some(url) = initial_article
         .url
         .as_ref()
         .filter(|value| safe_fetchable_url(value))
     {
-        fetch_html(url).await?
+        match fetch_html(url).await {
+            Ok(fetched_html) => (fetched_html.clone(), Some(fetched_html)),
+            Err(_) => {
+                let fallback_html = fallback_html_from_article(&initial_article);
+                (fallback_html.clone(), Some(fallback_html))
+            }
+        }
     } else {
-        fallback_html_from_article(&initial_article)
+        let fallback_html = fallback_html_from_article(&initial_article);
+        (fallback_html.clone(), Some(fallback_html))
     };
 
-    let extracted_author = Document::from(raw_html.as_str());
-    let next_author = extract_author(&extracted_author)
+    let cleaned = run_node_cleaner(html_for_cleaning, initial_article.url.clone()).await?;
+    let cleaned_html = normalize_optional_text(cleaned.cleaned_html)
+        .ok_or_else(|| "Article cleaner returned empty cleaned_html".to_string())?;
+    let cleaned_markdown = normalize_optional_text(cleaned.cleaned_markdown)
+        .ok_or_else(|| "Article cleaner returned empty cleaned_markdown".to_string())?;
+    let next_title = normalize_optional_text(cleaned.title).or_else(|| Some(initial_article.title.clone()));
+    let next_author = normalize_optional_text(cleaned.byline)
         .or_else(|| initial_article.author.clone())
         .or_else(|| initial_article.source.clone());
-
-    let cleaned_html = clean_html(&raw_html, initial_article.url.as_deref()).or_else(|_| {
-        clean_html(
-            &fallback_html_from_article(&initial_article),
-            initial_article.url.as_deref(),
-        )
-    })?;
-    let cleaned_markdown = html_to_markdown(&cleaned_html)?;
+    let next_excerpt = normalize_optional_text(cleaned.excerpt).or_else(|| initial_article.excerpt.clone());
 
     let conn = open_database(&app)?;
     update_article_cleaning(
         &conn,
         &article_id,
-        Some(&raw_html),
+        raw_html_to_store.as_deref(),
         Some(&cleaned_html),
         Some(&cleaned_markdown),
+        next_title.as_deref(),
+        next_author.as_deref(),
+        next_excerpt.as_deref(),
     )?;
-    conn.execute(
-        "
-        UPDATE articles
-        SET author = COALESCE(?2, author), updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?1
-        ",
-        params![article_id, next_author],
-    )
-    .map_err(|error| format!("Failed to update article author: {error}"))?;
 
     load_article_by_id(&conn, &article_id)
 }

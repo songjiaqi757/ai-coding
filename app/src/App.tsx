@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import MarkdownIt from "markdown-it";
 import "./App.css";
 
 type Feed = {
@@ -29,164 +30,6 @@ type Article = {
 };
 
 type ReaderState = "empty" | "loading" | "error" | "success";
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function safeHref(url: string) {
-  const normalized = url.trim().toLowerCase();
-  if (
-    normalized.startsWith("javascript:") ||
-    normalized.startsWith("vbscript:") ||
-    normalized.startsWith("data:text/html")
-  ) {
-    return "";
-  }
-
-  return escapeHtml(url.trim());
-}
-
-function renderInlineMarkdown(value: string) {
-  let html = escapeHtml(value).replace(
-    /\\([\\`*_{}\[\]()#+\-.!])/g,
-    "$1",
-  );
-
-  html = html.replace(
-    /!\[([^\]]*)\]\(([^)]+)\)/g,
-    (_match: string, alt: string, src: string) =>
-      `<img src="${safeHref(src)}" alt="${escapeHtml(alt)}" />`,
-  );
-  html = html.replace(
-    /\[([^\]]+)\]\(([^)]+)\)/g,
-    (_match: string, text: string, href: string) =>
-      `<a href="${safeHref(href)}" target="_blank" rel="noreferrer">${escapeHtml(text)}</a>`,
-  );
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-
-  return html;
-}
-
-function renderMarkdownToHtml(markdown: string) {
-  const lines = markdown.split(/\r?\n/);
-  const blocks: string[] = [];
-  let paragraph: string[] = [];
-  let listItems: string[] = [];
-  let orderedListItems: string[] = [];
-  let quoteLines: string[] = [];
-  let codeLines: string[] = [];
-  let inCodeBlock = false;
-
-  function flushParagraph() {
-    if (paragraph.length > 0) {
-      blocks.push(`<p>${renderInlineMarkdown(paragraph.join(" "))}</p>`);
-      paragraph = [];
-    }
-  }
-
-  function flushLists() {
-    if (listItems.length > 0) {
-      blocks.push(`<ul>${listItems.join("")}</ul>`);
-      listItems = [];
-    }
-    if (orderedListItems.length > 0) {
-      blocks.push(`<ol>${orderedListItems.join("")}</ol>`);
-      orderedListItems = [];
-    }
-  }
-
-  function flushQuotes() {
-    if (quoteLines.length > 0) {
-      blocks.push(
-        `<blockquote><p>${renderInlineMarkdown(quoteLines.join(" "))}</p></blockquote>`,
-      );
-      quoteLines = [];
-    }
-  }
-
-  function flushCode() {
-    if (codeLines.length > 0) {
-      blocks.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
-      codeLines = [];
-    }
-  }
-
-  for (const line of lines) {
-    if (line.startsWith("```")) {
-      flushParagraph();
-      flushLists();
-      flushQuotes();
-      if (inCodeBlock) {
-        flushCode();
-      }
-      inCodeBlock = !inCodeBlock;
-      continue;
-    }
-
-    if (inCodeBlock) {
-      codeLines.push(line);
-      continue;
-    }
-
-    const trimmed = line.trim();
-    if (!trimmed) {
-      flushParagraph();
-      flushLists();
-      flushQuotes();
-      continue;
-    }
-
-    const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)$/);
-    if (headingMatch) {
-      flushParagraph();
-      flushLists();
-      flushQuotes();
-      const level = headingMatch[1].length;
-      blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
-      continue;
-    }
-
-    if (trimmed.startsWith(">")) {
-      flushParagraph();
-      flushLists();
-      quoteLines.push(trimmed.replace(/^>\s?/, ""));
-      continue;
-    }
-
-    const unorderedMatch = trimmed.match(/^[-*+]\s+(.*)$/);
-    if (unorderedMatch) {
-      flushParagraph();
-      flushQuotes();
-      listItems.push(`<li>${renderInlineMarkdown(unorderedMatch[1])}</li>`);
-      continue;
-    }
-
-    const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/);
-    if (orderedMatch) {
-      flushParagraph();
-      flushQuotes();
-      orderedListItems.push(`<li>${renderInlineMarkdown(orderedMatch[1])}</li>`);
-      continue;
-    }
-
-    paragraph.push(trimmed);
-  }
-
-  flushParagraph();
-  flushLists();
-  flushQuotes();
-  flushCode();
-
-  return blocks.join("");
-}
 
 function App() {
   const [feeds, setFeeds] = useState<Feed[]>([]);
@@ -301,13 +144,22 @@ function App() {
     return selectedArticle;
   }, [selectedArticle, selectedArticleDetail]);
 
+  const markdown = useMemo(() => {
+    return new MarkdownIt({
+      html: false,
+      linkify: true,
+      breaks: false,
+      typographer: false,
+    });
+  }, []);
+
   const renderedMarkdown = useMemo(() => {
     if (!readerArticle?.cleaned_markdown) {
       return null;
     }
 
-    return renderMarkdownToHtml(readerArticle.cleaned_markdown);
-  }, [readerArticle?.cleaned_markdown]);
+    return markdown.render(readerArticle.cleaned_markdown);
+  }, [markdown, readerArticle?.cleaned_markdown]);
 
   useEffect(() => {
     if (
