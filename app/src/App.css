@@ -300,6 +300,10 @@ button {
   letter-spacing: -0.03em;
 }
 
+.reader-content p:first-child {
+  margin-top: 0;
+}
+
 .reader-content blockquote {
   margin: 32px 0 0;
   padding: 18px 22px;
@@ -307,6 +311,126 @@ button {
   border-radius: 12px;
   background: #f1f6ff;
   color: #37517a;
+}
+
+.reader-link {
+  display: inline-flex;
+  margin-top: 18px;
+  color: #1f6feb;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.reader-link:hover {
+  text-decoration: underline;
+}
+
+.reader-status {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  padding: 48px;
+  color: #64748b;
+  font-size: 16px;
+  text-align: center;
+}
+
+.reader-status-error {
+  color: #991b1b;
+}
+
+.reader-placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.reader-placeholder p {
+  margin: 0;
+  color: #526074;
+}
+
+.reader-prose {
+  width: 100%;
+}
+
+.reader-prose p,
+.reader-prose ul,
+.reader-prose ol,
+.reader-prose pre,
+.reader-prose table,
+.reader-prose blockquote {
+  margin: 0 0 22px;
+}
+
+.reader-prose h1,
+.reader-prose h2,
+.reader-prose h3,
+.reader-prose h4,
+.reader-prose h5,
+.reader-prose h6 {
+  margin: 36px 0 16px;
+  color: #132238;
+  line-height: 1.25;
+}
+
+.reader-prose ul,
+.reader-prose ol {
+  padding-left: 24px;
+}
+
+.reader-prose li + li {
+  margin-top: 8px;
+}
+
+.reader-prose a {
+  color: #1f6feb;
+}
+
+.reader-prose img {
+  max-width: 100%;
+  border-radius: 16px;
+}
+
+.reader-prose pre,
+.reader-prose code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.reader-prose pre {
+  overflow-x: auto;
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: #f4f7fb;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.reader-prose :not(pre) > code {
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: #eff3f8;
+  font-size: 0.9em;
+}
+
+.reader-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+}
+
+.reader-prose th,
+.reader-prose td {
+  padding: 10px 12px;
+  border: 1px solid #dbe1ea;
+  text-align: left;
+}
+
+.reader-prose th {
+  background: #f8fafc;
 }
 
 @media (max-width: 1100px) {
