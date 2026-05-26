@@ -1,3 +1,5 @@
+mod opml;
+
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::fs;
@@ -336,8 +338,6 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
     Ok(rows)
 }
 
-// mod opml;  // TODO: 取消注释 when Person C submits opml.rs
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -348,7 +348,7 @@ pub fn run() {
             list_articles,
             add_feed,
             refresh_feed,
-            // crate::opml::import_opml,  // TODO: 取消注释 when Person C submits opml.rs
+            crate::opml::import_opml,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
