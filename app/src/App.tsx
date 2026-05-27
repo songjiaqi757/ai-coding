@@ -22,6 +22,13 @@ type Article = {
 
 type ReadView = "original" | "translation" | "bilingual";
 
+const TARGET_LANG_OPTIONS: { value: string; label: string }[] = [
+  { value: "zh", label: "中文" },
+  { value: "en", label: "English" },
+  { value: "ja", label: "日本語" },
+  { value: "ko", label: "한국어" },
+];
+
 function App() {
   const [feeds, setFeeds] = useState<Feed[]>([]);
   const [articles, setArticles] = useState<Article[]>([]);
@@ -137,11 +144,47 @@ function App() {
       setArticles((prev) =>
         prev.map((a) => (a.id === selectedArticleId ? { ...a, translation } : a)),
       );
-      setReadView("translation");
     } catch (error) {
       setAiError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsTranslating(false);
+    }
+  }
+
+  async function handleReadViewChange(view: ReadView) {
+    setReadView(view);
+    if (
+      (view === "translation" || view === "bilingual") &&
+      selectedArticle &&
+      !selectedArticle.translation &&
+      !isTranslating
+    ) {
+      await handleTranslate();
+    }
+  }
+
+  async function handleTargetLangChange(lang: string) {
+    setTargetLang(lang);
+    if (
+      selectedArticle &&
+      (readView === "translation" || readView === "bilingual") &&
+      !isTranslating
+    ) {
+      setIsTranslating(true);
+      setAiError(null);
+      try {
+        const translation = await invoke<string>("translate_article", {
+          articleId: selectedArticle.id,
+          targetLang: lang,
+        });
+        setArticles((prev) =>
+          prev.map((a) => (a.id === selectedArticle.id ? { ...a, translation } : a)),
+        );
+      } catch (error) {
+        setAiError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setIsTranslating(false);
+      }
     }
   }
 
@@ -180,6 +223,11 @@ function App() {
       setSelectedArticleId(visibleArticles[0].id);
     }
   }, [selectedArticleId, visibleArticles]);
+
+  useEffect(() => {
+    setReadView("original");
+    setAiError(null);
+  }, [selectedArticleId]);
 
   function handleSelectFeed(feedId: string) {
     setSelectedFeedId(feedId);
@@ -278,73 +326,84 @@ function App() {
         {selectedArticle ? (
           <>
             <div className="reader-header">
-              <div>
-                <div className="article-meta">
-                  <span>{selectedArticle.source}</span>
-                  <span>{selectedArticle.publishedAt}</span>
-                </div>
-                <h2>{selectedArticle.title}</h2>
+              <div className="article-meta">
+                <span>{selectedArticle.source}</span>
+                <span>{selectedArticle.publishedAt}</span>
+              </div>
+              <h2>{selectedArticle.title}</h2>
+            </div>
+
+            <div className="reader-toolbar">
+              <button
+                type="button"
+                className={`toolbar-btn toolbar-summary${selectedArticle.summary ? " has-result" : ""}`}
+                onClick={() => handleSummarize(!!selectedArticle.summary)}
+                disabled={isSummarizing}
+              >
+                {isSummarizing ? "…" : "Summary"}
+              </button>
+
+              <div className="view-tabs" role="tablist" aria-label="阅读视图">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={readView === "original"}
+                  className={readView === "original" ? "view-tab active" : "view-tab"}
+                  onClick={() => void handleReadViewChange("original")}
+                >
+                  原文
+                </button>
+                <span className="view-tab-sep" aria-hidden="true">
+                  ｜
+                </span>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={readView === "bilingual"}
+                  className={readView === "bilingual" ? "view-tab active" : "view-tab"}
+                  onClick={() => void handleReadViewChange("bilingual")}
+                  disabled={isTranslating && readView !== "bilingual"}
+                >
+                  双语
+                </button>
+                <span className="view-tab-sep" aria-hidden="true">
+                  ｜
+                </span>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={readView === "translation"}
+                  className={readView === "translation" ? "view-tab active" : "view-tab"}
+                  onClick={() => void handleReadViewChange("translation")}
+                  disabled={isTranslating && readView !== "translation"}
+                >
+                  {isTranslating && readView !== "original" ? "译文中…" : "译文"}
+                </button>
               </div>
 
-              <div className="reader-actions">
-                <button
-                  onClick={() => handleSummarize()}
-                  disabled={isSummarizing}
-                  className={isSummarizing ? "action-loading" : ""}
-                >
-                  {isSummarizing ? "Summarizing..." : selectedArticle.summary ? "Regenerate Summary" : "Summary"}
-                </button>
-                <button
-                  onClick={() => handleTranslate()}
-                  disabled={isTranslating}
-                  className={isTranslating ? "action-loading" : ""}
-                >
-                  {isTranslating ? "Translating..." : "Translate"}
-                </button>
+              <label className="lang-target">
+                <span className="lang-target-label">译至:</span>
                 <select
                   className="lang-select"
                   value={targetLang}
-                  onChange={(e) => setTargetLang(e.target.value)}
+                  onChange={(e) => void handleTargetLangChange(e.target.value)}
+                  disabled={isTranslating}
                 >
-                  <option value="zh">Chinese</option>
-                  <option value="en">English</option>
-                  <option value="ja">Japanese</option>
-                  <option value="ko">Korean</option>
+                  {TARGET_LANG_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
                 </select>
-              </div>
+              </label>
             </div>
 
-            {aiError && <div className="error-box">{aiError}</div>}
+            {aiError && <div className="error-box reader-error">{aiError}</div>}
 
-            {/* Summary section */}
             {selectedArticle.summary && (
               <div className="ai-result-section">
                 <div className="ai-result-label">Summary</div>
                 <div className="ai-result-content">{selectedArticle.summary}</div>
-              </div>
-            )}
-
-            {/* View tabs */}
-            {selectedArticle.translation && (
-              <div className="view-tabs">
-                <button
-                  className={readView === "original" ? "view-tab active" : "view-tab"}
-                  onClick={() => setReadView("original")}
-                >
-                  Original
-                </button>
-                <button
-                  className={readView === "translation" ? "view-tab active" : "view-tab"}
-                  onClick={() => setReadView("translation")}
-                >
-                  Translation
-                </button>
-                <button
-                  className={readView === "bilingual" ? "view-tab active" : "view-tab"}
-                  onClick={() => setReadView("bilingual")}
-                >
-                  Bilingual
-                </button>
               </div>
             )}
 
@@ -367,12 +426,15 @@ function App() {
                 </>
               )}
 
-              {(readView === "translation" || readView === "bilingual") && selectedArticle.translation && (
-                <div className="translation-block">
-                  <h3>Translation</h3>
-                  <p>{selectedArticle.translation}</p>
-                </div>
-              )}
+              {(readView === "translation" || readView === "bilingual") &&
+                (selectedArticle.translation ? (
+                  <div className="translation-block">
+                    <h3>译文</h3>
+                    <p>{selectedArticle.translation}</p>
+                  </div>
+                ) : isTranslating ? (
+                  <p className="translation-pending">正在翻译…</p>
+                ) : null)}
             </div>
           </>
         ) : (
