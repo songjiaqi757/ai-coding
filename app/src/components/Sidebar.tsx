@@ -64,6 +64,20 @@ export function Sidebar({
     }
   }
 
+  async function handleExportOpml() {
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const filePath = await save({
+        defaultPath: "mercury-subscriptions.opml",
+        filters: [{ name: "OPML", extensions: ["opml", "xml"] }],
+      });
+      if (!filePath) return;
+      await invoke("export_opml", { filePath });
+    } catch (error) {
+      console.error("Export OPML failed", error);
+    }
+  }
+
   const allFeed: Feed = {
     id: "all",
     title: "全部订阅",
@@ -100,6 +114,13 @@ export function Sidebar({
               onClick={handleImportOpml}
             >
               &#8593;
+            </button>
+            <button
+              className="icon-button"
+              title="导出 OPML"
+              onClick={handleExportOpml}
+            >
+              &#8595;
             </button>
           </div>
         </div>

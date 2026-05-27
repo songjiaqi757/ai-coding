@@ -1,9 +1,16 @@
-use opml::OPML;
+use opml::{Head, Outline, OPML};
 use rusqlite::params;
 use tauri::AppHandle;
 use uuid::Uuid;
 
 use crate::{open_database, save_articles, Feed};
+
+#[derive(Debug)]
+pub struct ExportFeed {
+    pub title: String,
+    pub url: String,
+    pub site_url: Option<String>,
+}
 
 /// Parse OPML content and extract every feed as (title, xml_url).
 pub fn parse_opml_feeds(xml: &str) -> Result<Vec<(String, String)>, String> {
@@ -57,6 +64,74 @@ pub async fn import_opml(app: AppHandle, file_path: String) -> Result<Vec<Feed>,
     }
 
     Ok(imported_feeds)
+}
+
+#[tauri::command]
+pub fn export_opml(app: AppHandle, file_path: String) -> Result<usize, String> {
+    let conn = open_database(&app)?;
+    let feeds = list_export_feeds(&conn)?;
+
+    if feeds.is_empty() {
+        return Err("No feeds to export.".to_string());
+    }
+
+    let xml = build_opml_xml(&feeds)?;
+    std::fs::write(&file_path, xml)
+        .map_err(|error| format!("Failed to write OPML file '{file_path}': {error}"))?;
+
+    Ok(feeds.len())
+}
+
+fn list_export_feeds(conn: &rusqlite::Connection) -> Result<Vec<ExportFeed>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT title, url, site_url
+             FROM feeds
+             ORDER BY title ASC",
+        )
+        .map_err(|error| format!("Failed to prepare OPML export query: {error}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ExportFeed {
+                title: row.get(0)?,
+                url: row.get(1)?,
+                site_url: row.get(2)?,
+            })
+        })
+        .map_err(|error| format!("Failed to query feeds for OPML export: {error}"))?;
+
+    let mut feeds = Vec::new();
+    for row in rows {
+        feeds.push(row.map_err(|error| format!("Failed to read feed for OPML export: {error}"))?);
+    }
+
+    Ok(feeds)
+}
+
+pub fn build_opml_xml(feeds: &[ExportFeed]) -> Result<String, String> {
+    let mut document = OPML::default();
+    document.head = Some(Head {
+        title: Some("Mercury subscriptions".to_string()),
+        docs: Some("http://opml.org/spec2.opml".to_string()),
+        ..Head::default()
+    });
+
+    document.body.outlines = feeds
+        .iter()
+        .map(|feed| Outline {
+            text: feed.title.clone(),
+            r#type: Some("rss".to_string()),
+            xml_url: Some(feed.url.clone()),
+            html_url: feed.site_url.clone(),
+            title: Some(feed.title.clone()),
+            ..Outline::default()
+        })
+        .collect();
+
+    document
+        .to_string()
+        .map_err(|error| format!("Failed to generate OPML: {error}"))
 }
 
 async fn fetch_and_save_feed(app: &AppHandle, opml_title: &str, url: &str) -> Result<Feed, String> {
@@ -169,7 +244,7 @@ fn find_existing_feed(app: &AppHandle, url: &str) -> Result<Option<Feed>, String
 
 #[cfg(test)]
 mod tests {
-    use super::parse_opml_feeds;
+    use super::{build_opml_xml, parse_opml_feeds, ExportFeed};
     use std::path::Path;
 
     #[test]
@@ -213,5 +288,29 @@ mod tests {
         assert!(feeds
             .iter()
             .any(|(_, url)| url == "https://hnrss.org/frontpage"));
+    }
+
+    #[test]
+    fn exports_feeds_as_opml() {
+        let xml = build_opml_xml(&[
+            ExportFeed {
+                title: "Example Feed".to_string(),
+                url: "https://example.com/rss.xml".to_string(),
+                site_url: Some("https://example.com".to_string()),
+            },
+            ExportFeed {
+                title: "Another Feed".to_string(),
+                url: "https://example.com/atom.xml".to_string(),
+                site_url: None,
+            },
+        ])
+        .expect("OPML export should be generated");
+
+        let feeds = parse_opml_feeds(&xml).expect("exported OPML should parse");
+
+        assert_eq!(feeds.len(), 2);
+        assert_eq!(feeds[0].0, "Example Feed");
+        assert_eq!(feeds[0].1, "https://example.com/rss.xml");
+        assert_eq!(feeds[1].1, "https://example.com/atom.xml");
     }
 }

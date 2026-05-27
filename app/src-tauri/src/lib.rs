@@ -1,6 +1,6 @@
 mod opml;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
@@ -48,6 +48,9 @@ pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
     let conn = Connection::open(path)
         .map_err(|error| format!("Failed to open SQLite database: {error}"))?;
 
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| format!("Failed to enable SQLite foreign keys: {error}"))?;
+
     init_schema(&conn)?;
     seed_database(&conn)?;
 
@@ -94,6 +97,31 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
 
 fn seed_database(_conn: &Connection) -> Result<(), String> {
     Ok(())
+}
+
+pub(crate) fn find_feed_by_url(conn: &Connection, url: &str) -> Result<Option<Feed>, String> {
+    conn.query_row(
+        "SELECT f.id, f.title, f.url, f.site_url, f.last_sync_at,
+                COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread
+         FROM feeds f
+         LEFT JOIN articles a ON a.feed_id = f.id
+         WHERE f.url = ?1
+         GROUP BY f.id, f.title, f.url, f.site_url, f.last_sync_at
+         LIMIT 1",
+        params![url],
+        |row| {
+            Ok(Feed {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                url: row.get(2)?,
+                site_url: row.get(3)?,
+                last_sync_at: row.get(4)?,
+                unread: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| format!("Failed to query feed by URL: {error}"))
 }
 
 pub fn save_articles(
@@ -152,8 +180,10 @@ pub fn save_articles(
             ],
         );
 
-        if let Ok(1) = result {
-            saved += 1;
+        match result {
+            Ok(1) => saved += 1,
+            Ok(_) => {}
+            Err(error) => return Err(format!("Failed to save article: {error}")),
         }
     }
 
@@ -174,7 +204,6 @@ async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
     let parsed = feed_rs::parser::parse(bytes.as_ref())
         .map_err(|error| format!("无法解析为 RSS/Atom/JSON Feed: {error}"))?;
 
-    let feed_id = Uuid::new_v4().to_string();
     let title = parsed
         .title
         .map(|title| title.content)
@@ -182,8 +211,17 @@ async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
     let site_url = parsed.links.first().map(|link| link.href.clone());
 
     let conn = open_database(&app)?;
+
+    if let Some(existing_feed) = find_feed_by_url(&conn, &url)? {
+        save_articles(&conn, &existing_feed.id, parsed.entries)?;
+        return find_feed_by_url(&conn, &url)?
+            .ok_or_else(|| "Feed disappeared after saving articles".to_string());
+    }
+
+    let feed_id = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT OR IGNORE INTO feeds (id, title, url, site_url) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO feeds (id, title, url, site_url, last_sync_at)
+         VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
         params![feed_id, title, url, site_url],
     )
     .map_err(|error| format!("保存订阅源失败: {error}"))?;
@@ -198,13 +236,21 @@ async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
         )
         .map_err(|error| format!("查询未读数失败: {error}"))?;
 
+    let last_sync_at = conn
+        .query_row(
+            "SELECT last_sync_at FROM feeds WHERE id = ?1",
+            params![feed_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Failed to query sync time: {error}"))?;
+
     Ok(Feed {
         id: feed_id,
         title,
         url,
         site_url,
         unread,
-        last_sync_at: None,
+        last_sync_at,
     })
 }
 
@@ -364,6 +410,7 @@ pub fn run() {
             add_feed,
             refresh_feed,
             crate::opml::import_opml,
+            crate::opml::export_opml,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
