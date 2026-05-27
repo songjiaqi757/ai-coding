@@ -4,7 +4,7 @@
     <title>Mercury Test Feeds</title>
   </head>
   <body>
-    <outline text="Technology" title="Technology">
+    <outline text="技术" title="技术">
       <outline text="阮一峰的网络日志" title="阮一峰的网络日志"
                type="rss" xmlUrl="https://feeds.feedburner.com/ruanyifeng"
                htmlUrl="https://ruanyifeng.com"/>
@@ -12,7 +12,7 @@
                type="rss" xmlUrl="https://hnrss.org/frontpage"
                htmlUrl="https://news.ycombinator.com"/>
     </outline>
-    <outline text="Science" title="Science">
+    <outline text="科学" title="科学">
       <outline text="NASA" title="NASA Breaking News"
                type="rss" xmlUrl="https://www.nasa.gov/news-release/feed/"
                htmlUrl="https://www.nasa.gov"/>

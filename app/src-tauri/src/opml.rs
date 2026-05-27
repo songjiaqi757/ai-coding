@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use opml::OPML;
 use rusqlite::params;
 use tauri::AppHandle;
@@ -78,7 +76,7 @@ async fn fetch_and_save_feed(app: &AppHandle, opml_title: &str, url: &str) -> Re
         .bytes()
         .await
         .map_err(|error| format!("Failed to read feed response: {error}"))?;
-    let parsed = feed_rs::parser::parse_with_uri(bytes.as_ref(), Some(url))
+    let parsed = feed_rs::parser::parse(bytes.as_ref())
         .map_err(|error| format!("Failed to parse feed: {error}"))?;
 
     let feed_id = Uuid::new_v4().to_string();
@@ -145,11 +143,15 @@ fn find_existing_feed(app: &AppHandle, url: &str) -> Result<Option<Feed>, String
         .map_err(|error| format!("Failed to read existing feed: {error}"))?
     {
         return Ok(Some(Feed {
-            id: row.get(0).map_err(|error| format!("Failed to read feed id: {error}"))?,
+            id: row
+                .get(0)
+                .map_err(|error| format!("Failed to read feed id: {error}"))?,
             title: row
                 .get(1)
                 .map_err(|error| format!("Failed to read feed title: {error}"))?,
-            url: row.get(2).map_err(|error| format!("Failed to read feed url: {error}"))?,
+            url: row
+                .get(2)
+                .map_err(|error| format!("Failed to read feed url: {error}"))?,
             site_url: row
                 .get(3)
                 .map_err(|error| format!("Failed to read feed site url: {error}"))?,
@@ -168,6 +170,7 @@ fn find_existing_feed(app: &AppHandle, url: &str) -> Result<Option<Feed>, String
 #[cfg(test)]
 mod tests {
     use super::parse_opml_feeds;
+    use std::path::Path;
 
     #[test]
     fn parses_nested_opml_feeds() {
@@ -190,5 +193,25 @@ mod tests {
         assert_eq!(feeds[0].0, "Example Feed");
         assert_eq!(feeds[0].1, "https://example.com/rss.xml");
         assert_eq!(feeds[1].0, "Another Feed");
+    }
+
+    #[test]
+    fn parses_sample_opml_file() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let sample_path = manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .expect("src-tauri should be inside app")
+            .join("samples")
+            .join("opml")
+            .join("example.opml");
+        let xml = std::fs::read_to_string(sample_path).expect("sample OPML should be readable");
+
+        let feeds = parse_opml_feeds(&xml).expect("sample OPML should parse");
+
+        assert!(feeds.len() >= 2);
+        assert!(feeds
+            .iter()
+            .any(|(_, url)| url == "https://hnrss.org/frontpage"));
     }
 }

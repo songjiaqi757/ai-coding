@@ -17,10 +17,8 @@ export function ArticleList({
     <section className="article-list">
       <div className="toolbar">
         <div>
-          <h2>Articles</h2>
-          <p>
-            {isLoading ? "加载中..." : `${articles.length} 篇文章`}
-          </p>
+          <h2>文章</h2>
+          <p>{isLoading ? "加载中..." : `${articles.length} 篇文章`}</p>
         </div>
       </div>
 

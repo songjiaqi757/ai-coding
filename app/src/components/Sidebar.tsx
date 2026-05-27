@@ -29,30 +29,24 @@ export function Sidebar({
       setAddUrl("");
       setShowAddDialog(false);
       onFeedsChange();
-    } catch (e) {
-      if (typeof e === "string" || e instanceof Error) {
-        setAddError(e.toString());
-      }
-      /* Pure frontend dev — invoke unavailable, treat as success */
-      else {
-        setAddUrl("");
-        setShowAddDialog(false);
+    } catch (error) {
+      if (typeof error === "string" || error instanceof Error) {
+        setAddError(error.toString());
+      } else {
+        setAddError("添加订阅失败");
       }
     } finally {
       setIsAdding(false);
     }
   }
 
-  async function handleRefreshFeed(
-    feedId: string,
-    e: MouseEvent,
-  ) {
-    e.stopPropagation();
+  async function handleRefreshFeed(feedId: string, event: MouseEvent) {
+    event.stopPropagation();
     try {
       await invoke("refresh_feed", { feedId });
       onFeedsChange();
-    } catch {
-      /* Pure frontend dev — ignored */
+    } catch (error) {
+      console.error("刷新失败", error);
     }
   }
 
@@ -65,17 +59,17 @@ export function Sidebar({
       if (!filePath) return;
       await invoke("import_opml", { filePath });
       onFeedsChange();
-    } catch {
-      /* Pure frontend dev — ignored */
+    } catch (error) {
+      console.error("导入 OPML 失败", error);
     }
   }
 
   const allFeed: Feed = {
     id: "all",
-    title: "All Feeds",
+    title: "全部订阅",
     url: "",
     siteUrl: null,
-    unread: feeds.reduce((sum, f) => sum + f.unread, 0),
+    unread: feeds.reduce((sum, feed) => sum + feed.unread, 0),
     lastSyncAt: null,
   };
 
@@ -91,7 +85,7 @@ export function Sidebar({
 
       <section className="panel-section">
         <div className="section-header">
-          <div className="section-title">Feeds</div>
+          <div className="section-title">订阅源</div>
           <div className="section-actions">
             <button
               className="icon-button"
@@ -120,7 +114,13 @@ export function Sidebar({
             >
               <button
                 className="feed-title"
-                style={{ flex: 1, background: "none", border: "none", cursor: "pointer", padding: 0 }}
+                style={{
+                  flex: 1,
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: 0,
+                }}
                 onClick={() => onSelectFeed(feed.id)}
               >
                 {feed.title}
@@ -130,7 +130,7 @@ export function Sidebar({
                   <button
                     className="refresh-button"
                     title="刷新"
-                    onClick={(e) => handleRefreshFeed(feed.id, e)}
+                    onClick={(event) => handleRefreshFeed(feed.id, event)}
                   >
                     &#8635;
                   </button>
@@ -147,13 +147,13 @@ export function Sidebar({
           className="dialog-overlay"
           onClick={() => setShowAddDialog(false)}
         >
-          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="dialog" onClick={(event) => event.stopPropagation()}>
             <h3>添加订阅源</h3>
             <input
               placeholder="输入 RSS/Atom 地址..."
               value={addUrl}
-              onChange={(e) => setAddUrl(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAddFeed()}
+              onChange={(event) => setAddUrl(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && handleAddFeed()}
               autoFocus
             />
             {addError && <p className="error-text">{addError}</p>}

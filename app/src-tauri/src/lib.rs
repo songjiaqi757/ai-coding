@@ -58,14 +58,14 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS feeds (
-            id          TEXT PRIMARY KEY,
-            title       TEXT NOT NULL,
-            url         TEXT NOT NULL UNIQUE,
-            site_url    TEXT,
-            unread      INTEGER NOT NULL DEFAULT 0,
+            id           TEXT PRIMARY KEY,
+            title        TEXT NOT NULL,
+            url          TEXT NOT NULL UNIQUE,
+            site_url     TEXT,
+            unread       INTEGER NOT NULL DEFAULT 0,
             last_sync_at TEXT,
-            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS articles (
@@ -110,29 +110,29 @@ pub fn save_articles(
         };
 
         let article_id = Uuid::new_v4().to_string();
-        let _guid = Some(entry.id.clone());
+        let guid = Some(entry.id.clone());
         let title = entry
             .title
-            .map(|t| t.content)
+            .map(|title| title.content)
             .unwrap_or_else(|| "无标题".to_string());
-        let author = entry.authors.first().map(|a| a.name.clone());
-        let published_at = entry.published.map(|dt| dt.to_rfc3339());
+        let author = entry.authors.first().map(|author| author.name.clone());
+        let published_at = entry.published.map(|date| date.to_rfc3339());
 
         let excerpt = entry
             .summary
-            .map(|s| s.content)
+            .map(|summary| summary.content)
             .or_else(|| {
                 entry
                     .content
                     .as_ref()
-                    .and_then(|c| c.body.as_ref())
-                    .map(|b| b.chars().take(200).collect())
+                    .and_then(|content| content.body.as_ref())
+                    .map(|body| body.chars().take(200).collect())
             })
             .unwrap_or_default();
 
         let content = entry
             .content
-            .and_then(|c| c.body)
+            .and_then(|content| content.body)
             .unwrap_or_default();
 
         let result = conn.execute(
@@ -140,8 +140,15 @@ pub fn save_articles(
                 (id, feed_id, title, url, guid, author, published_at, excerpt, content)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                article_id, feed_id, title, url, _guid,
-                author, published_at, excerpt, content
+                article_id,
+                feed_id,
+                title,
+                url,
+                guid,
+                author,
+                published_at,
+                excerpt,
+                content
             ],
         );
 
@@ -157,29 +164,29 @@ pub fn save_articles(
 async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
     let response = reqwest::get(&url)
         .await
-        .map_err(|e| format!("无法访问该 URL: {e}"))?;
+        .map_err(|error| format!("无法访问该 URL: {error}"))?;
 
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| format!("读取响应失败: {e}"))?;
+        .map_err(|error| format!("读取响应失败: {error}"))?;
 
     let parsed = feed_rs::parser::parse(bytes.as_ref())
-        .map_err(|e| format!("无法解析为 RSS/Atom/JSON Feed: {e}"))?;
+        .map_err(|error| format!("无法解析为 RSS/Atom/JSON Feed: {error}"))?;
 
     let feed_id = Uuid::new_v4().to_string();
     let title = parsed
         .title
-        .map(|t| t.content)
+        .map(|title| title.content)
         .unwrap_or_else(|| "未命名订阅源".to_string());
-    let site_url = parsed.links.first().map(|l| l.href.clone());
+    let site_url = parsed.links.first().map(|link| link.href.clone());
 
     let conn = open_database(&app)?;
     conn.execute(
         "INSERT OR IGNORE INTO feeds (id, title, url, site_url) VALUES (?1, ?2, ?3, ?4)",
         params![feed_id, title, url, site_url],
     )
-    .map_err(|e| format!("保存订阅源失败: {e}"))?;
+    .map_err(|error| format!("保存订阅源失败: {error}"))?;
 
     save_articles(&conn, &feed_id, parsed.entries)?;
 
@@ -189,7 +196,7 @@ async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
             params![feed_id],
             |row| row.get(0),
         )
-        .map_err(|e| format!("查询未读数失败: {e}"))?;
+        .map_err(|error| format!("查询未读数失败: {error}"))?;
 
     Ok(Feed {
         id: feed_id,
@@ -215,13 +222,13 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
 
     let response = reqwest::get(&feed_url)
         .await
-        .map_err(|e| format!("请求失败: {e}"))?;
+        .map_err(|error| format!("请求失败: {error}"))?;
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| format!("读取失败: {e}"))?;
-    let parsed = feed_rs::parser::parse(bytes.as_ref())
-        .map_err(|e| format!("解析失败: {e}"))?;
+        .map_err(|error| format!("读取失败: {error}"))?;
+    let parsed =
+        feed_rs::parser::parse(bytes.as_ref()).map_err(|error| format!("解析失败: {error}"))?;
 
     save_articles(&conn, &feed_id, parsed.entries)?;
 
@@ -230,7 +237,7 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
          WHERE id = ?1",
         params![feed_id],
     )
-    .map_err(|e| format!("更新同步时间失败: {e}"))?;
+    .map_err(|error| format!("更新同步时间失败: {error}"))?;
 
     list_articles_by_feed(&conn, Some(&feed_id))
 }
@@ -248,7 +255,7 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
              GROUP BY f.id
              ORDER BY f.title ASC",
         )
-        .map_err(|e| format!("准备查询失败: {e}"))?;
+        .map_err(|error| format!("准备查询失败: {error}"))?;
 
     let rows = stmt
         .query_map([], |row| {
@@ -261,11 +268,11 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
                 unread: row.get(5)?,
             })
         })
-        .map_err(|e| format!("查询失败: {e}"))?;
+        .map_err(|error| format!("查询失败: {error}"))?;
 
     let mut feeds = Vec::new();
     for row in rows {
-        feeds.push(row.map_err(|e| format!("读取行失败: {e}"))?);
+        feeds.push(row.map_err(|error| format!("读取行失败: {error}"))?);
     }
     Ok(feeds)
 }
@@ -281,55 +288,63 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
         Some(id) => (
             "SELECT id, feed_id, title, url, author, published_at, excerpt, content
              FROM articles WHERE feed_id = ?1
-             ORDER BY published_at DESC, created_at DESC".to_string(),
+             ORDER BY published_at DESC, created_at DESC"
+                .to_string(),
             Some(id.to_string()),
         ),
         None => (
             "SELECT id, feed_id, title, url, author, published_at, excerpt, content
              FROM articles
-             ORDER BY published_at DESC, created_at DESC".to_string(),
+             ORDER BY published_at DESC, created_at DESC"
+                .to_string(),
             None,
         ),
     };
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| format!("准备查询失败: {e}"))?;
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|error| format!("准备查询失败: {error}"))?;
 
     let rows: Vec<Article> = match param {
-        Some(p) => {
+        Some(param) => {
             let mut result = Vec::new();
-            let rows = stmt.query_map(params![p], |row| {
-                Ok(Article {
-                    id: row.get(0)?,
-                    feed_id: row.get(1)?,
-                    title: row.get(2)?,
-                    url: row.get(3)?,
-                    author: row.get(4)?,
-                    published_at: row.get(5)?,
-                    excerpt: row.get(6)?,
-                    content: row.get(7)?,
+            let rows = stmt
+                .query_map(params![param], |row| {
+                    Ok(Article {
+                        id: row.get(0)?,
+                        feed_id: row.get(1)?,
+                        title: row.get(2)?,
+                        url: row.get(3)?,
+                        author: row.get(4)?,
+                        published_at: row.get(5)?,
+                        excerpt: row.get(6)?,
+                        content: row.get(7)?,
+                    })
                 })
-            }).map_err(|e| format!("查询失败: {e}"))?;
+                .map_err(|error| format!("查询失败: {error}"))?;
             for row in rows {
-                result.push(row.map_err(|e| format!("读取行失败: {e}"))?);
+                result.push(row.map_err(|error| format!("读取行失败: {error}"))?);
             }
             result
         }
         None => {
             let mut result = Vec::new();
-            let rows = stmt.query_map([], |row| {
-                Ok(Article {
-                    id: row.get(0)?,
-                    feed_id: row.get(1)?,
-                    title: row.get(2)?,
-                    url: row.get(3)?,
-                    author: row.get(4)?,
-                    published_at: row.get(5)?,
-                    excerpt: row.get(6)?,
-                    content: row.get(7)?,
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(Article {
+                        id: row.get(0)?,
+                        feed_id: row.get(1)?,
+                        title: row.get(2)?,
+                        url: row.get(3)?,
+                        author: row.get(4)?,
+                        published_at: row.get(5)?,
+                        excerpt: row.get(6)?,
+                        content: row.get(7)?,
+                    })
                 })
-            }).map_err(|e| format!("查询失败: {e}"))?;
+                .map_err(|error| format!("查询失败: {error}"))?;
             for row in rows {
-                result.push(row.map_err(|e| format!("读取行失败: {e}"))?);
+                result.push(row.map_err(|error| format!("读取行失败: {error}"))?);
             }
             result
         }

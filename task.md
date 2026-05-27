@@ -1,0 +1,2 @@
+- 仔细阅读README.md,PLAN.md,task.md
+- 具体需要执行的任务：完成task.md中Person C需要完成的部分！

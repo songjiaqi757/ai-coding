@@ -5,7 +5,6 @@ import { ArticleList } from "./components/ArticleList";
 import type { Feed, Article } from "./types";
 import "./App.css";
 
-/* ── Mock data (pure frontend dev — Tauri invoke unavailable) ── */
 const MOCK_FEEDS: Feed[] = [
   {
     id: "1",
@@ -34,7 +33,8 @@ const MOCK_ARTICLES: Article[] = [
     author: "阮一峰",
     publishedAt: "2024-01-15",
     excerpt: "这是一篇示例文章的摘要，用于展示文章列表的样式。",
-    content: "<p>这是示例正文内容。在实际运行中，这里将显示从 RSS Feed 抓取的文章正文。</p>",
+    content:
+      "<p>这是示例正文内容。在实际运行中，这里将显示从 RSS Feed 抓取的文章正文。</p>",
   },
   {
     id: "a2",
@@ -83,10 +83,10 @@ function App() {
         setSelectedArticleId((current) => current ?? nextArticles[0].id);
       }
     } catch {
-      /* Pure frontend dev — Tauri invoke unavailable, fall back to mock */
       setFeeds(MOCK_FEEDS);
       setArticles(MOCK_ARTICLES);
       setSelectedArticleId((current) => current ?? MOCK_ARTICLES[0].id);
+      setErrorMessage("当前未连接 Tauri 后端，已展示本地示例数据。");
     } finally {
       setIsLoading(false);
     }
@@ -98,12 +98,12 @@ function App() {
 
   const visibleArticles = useMemo(() => {
     if (selectedFeedId === "all") return articles;
-    return articles.filter((a) => a.feedId === selectedFeedId);
+    return articles.filter((article) => article.feedId === selectedFeedId);
   }, [articles, selectedFeedId]);
 
   const selectedArticle = useMemo(
     () =>
-      articles.find((a) => a.id === selectedArticleId) ??
+      articles.find((article) => article.id === selectedArticleId) ??
       visibleArticles[0] ??
       null,
     [articles, selectedArticleId, visibleArticles],
