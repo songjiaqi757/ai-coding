@@ -16,4 +16,11 @@ export type Article = {
   publishedAt: string | null;
   excerpt: string;
   content: string;
+  rawHtml: string | null;
+  cleanedHtml: string | null;
+  cleanedMarkdown: string | null;
+  contentFetchedAt: string | null;
+  contentFetchStatus: string;
+  contentFetchError: string | null;
+  finalUrl: string | null;
 };

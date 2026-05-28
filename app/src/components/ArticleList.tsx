@@ -7,6 +7,14 @@ type Props = {
   onSelectArticle: (id: string) => void;
 };
 
+function stripHtml(value: string) {
+  return value.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function getPreview(article: Article) {
+  return stripHtml(article.excerpt || article.content || article.cleanedHtml || "");
+}
+
 export function ArticleList({
   articles,
   selectedArticleId,
@@ -51,7 +59,7 @@ export function ArticleList({
               </span>
             </div>
             <h3>{article.title}</h3>
-            <p>{article.excerpt}</p>
+            <p>{getPreview(article)}</p>
           </button>
         ))}
       </div>

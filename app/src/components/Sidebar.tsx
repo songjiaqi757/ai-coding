@@ -19,6 +19,9 @@ export function Sidebar({
   const [addUrl, setAddUrl] = useState("");
   const [isAdding, setIsAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [opmlStatus, setOpmlStatus] = useState<string | null>(null);
+  const [opmlError, setOpmlError] = useState<string | null>(null);
 
   async function handleAddFeed() {
     if (!addUrl.trim()) return;
@@ -51,16 +54,29 @@ export function Sidebar({
   }
 
   async function handleImportOpml() {
+    if (isImporting) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const filePath = await open({
         filters: [{ name: "OPML", extensions: ["opml", "xml"] }],
       });
       if (!filePath) return;
-      await invoke("import_opml", { filePath });
+      setIsImporting(true);
+      setOpmlStatus("正在导入 OPML...");
+      setOpmlError(null);
+      const importedFeeds = await invoke<Feed[]>("import_opml", { filePath });
+      setOpmlStatus(`已导入 ${importedFeeds.length} 个订阅源`);
       onFeedsChange();
     } catch (error) {
+      const message =
+        typeof error === "string" || error instanceof Error
+          ? error.toString()
+          : "导入 OPML 失败";
+      setOpmlError(message);
+      setOpmlStatus(null);
       console.error("导入 OPML 失败", error);
+    } finally {
+      setIsImporting(false);
     }
   }
 
@@ -74,7 +90,7 @@ export function Sidebar({
       if (!filePath) return;
       await invoke("export_opml", { filePath });
     } catch (error) {
-      console.error("Export OPML failed", error);
+      console.error("导出 OPML 失败", error);
     }
   }
 
@@ -110,10 +126,11 @@ export function Sidebar({
             </button>
             <button
               className="icon-button"
-              title="导入 OPML"
+              title={isImporting ? "正在导入 OPML" : "导入 OPML"}
               onClick={handleImportOpml}
+              disabled={isImporting}
             >
-              &#8593;
+              {isImporting ? "..." : String.fromCharCode(8593)}
             </button>
             <button
               className="icon-button"
@@ -124,6 +141,12 @@ export function Sidebar({
             </button>
           </div>
         </div>
+
+        {(opmlStatus || opmlError) && (
+          <div className={opmlError ? "opml-status error" : "opml-status"}>
+            {opmlError ?? opmlStatus}
+          </div>
+        )}
 
         <div className="feed-list">
           {[allFeed, ...feeds].map((feed) => (

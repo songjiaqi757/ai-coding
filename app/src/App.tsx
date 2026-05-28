@@ -5,6 +5,14 @@ import { ArticleList } from "./components/ArticleList";
 import type { Feed, Article } from "./types";
 import "./App.css";
 
+function getReaderHtml(article: Article) {
+  return (
+    article.cleanedHtml?.trim() ||
+    article.content.trim() ||
+    article.excerpt.trim()
+  );
+}
+
 const MOCK_FEEDS: Feed[] = [
   {
     id: "1",
@@ -34,7 +42,14 @@ const MOCK_ARTICLES: Article[] = [
     publishedAt: "2024-01-15",
     excerpt: "这是一篇示例文章的摘要，用于展示文章列表的样式。",
     content:
-      "<p>这是示例正文内容。在实际运行中，这里将显示从 RSS Feed 抓取的文章正文。</p>",
+      "<p>这是 Feed 提供的临时正文。后续清洗模块写入 cleanedHtml 后，阅读区会优先显示清洗后的内容。</p>",
+    rawHtml: null,
+    cleanedHtml: null,
+    cleanedMarkdown: null,
+    contentFetchedAt: null,
+    contentFetchStatus: "pending",
+    contentFetchError: null,
+    finalUrl: null,
   },
   {
     id: "a2",
@@ -44,7 +59,14 @@ const MOCK_ARTICLES: Article[] = [
     author: "阮一峰",
     publishedAt: "2024-01-14",
     excerpt: "这是第二篇示例文章的摘要。",
-    content: "<p>第二篇示例正文。</p>",
+    content: "",
+    rawHtml: null,
+    cleanedHtml: "<p>这是已清洗 HTML 的示例内容。</p>",
+    cleanedMarkdown: "这是已清洗 HTML 的示例内容。",
+    contentFetchedAt: "2024-01-14T00:00:00Z",
+    contentFetchStatus: "cleaned",
+    contentFetchError: null,
+    finalUrl: "https://example.com/2",
   },
   {
     id: "a3",
@@ -54,7 +76,14 @@ const MOCK_ARTICLES: Article[] = [
     author: "InfoQ",
     publishedAt: "2024-01-13",
     excerpt: "来自 InfoQ 的示例文章摘要。",
-    content: "<p>InfoQ 示例正文内容。</p>",
+    content: "",
+    rawHtml: null,
+    cleanedHtml: null,
+    cleanedMarkdown: null,
+    contentFetchedAt: null,
+    contentFetchStatus: "pending",
+    contentFetchError: null,
+    finalUrl: null,
   },
 ];
 
@@ -103,11 +132,15 @@ function App() {
 
   const selectedArticle = useMemo(
     () =>
-      articles.find((article) => article.id === selectedArticleId) ??
+      visibleArticles.find((article) => article.id === selectedArticleId) ??
       visibleArticles[0] ??
       null,
-    [articles, selectedArticleId, visibleArticles],
+    [selectedArticleId, visibleArticles],
   );
+
+  const selectedArticleHtml = selectedArticle
+    ? getReaderHtml(selectedArticle)
+    : "";
 
   return (
     <main className="app-shell">
@@ -140,12 +173,30 @@ function App() {
                 <h2>{selectedArticle.title}</h2>
               </div>
               <div className="reader-actions">
-                <button onClick={() => alert("Summary Agent - Phase 5")}>摘要</button>
-                <button onClick={() => alert("Translation Agent - Phase 6")}>翻译</button>
+                <button onClick={() => alert("Summary Agent - Phase 5")}>
+                  摘要
+                </button>
+                <button onClick={() => alert("Translation Agent - Phase 6")}>
+                  翻译
+                </button>
               </div>
             </div>
             <div className="reader-content">
-              <div dangerouslySetInnerHTML={{ __html: selectedArticle.content }} />
+              {selectedArticleHtml ? (
+                <div dangerouslySetInnerHTML={{ __html: selectedArticleHtml }} />
+              ) : (
+                <p className="reader-empty-content">
+                  这篇文章还没有可展示的正文。
+                </p>
+              )}
+              <a
+                className="source-link"
+                href={selectedArticle.finalUrl ?? selectedArticle.url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                打开原文
+              </a>
             </div>
           </>
         ) : (

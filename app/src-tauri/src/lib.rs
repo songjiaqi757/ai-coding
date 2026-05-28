@@ -1,6 +1,6 @@
 mod opml;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
@@ -29,6 +29,13 @@ pub struct Article {
     pub published_at: Option<String>,
     pub excerpt: String,
     pub content: String,
+    pub raw_html: Option<String>,
+    pub cleaned_html: Option<String>,
+    pub cleaned_markdown: Option<String>,
+    pub content_fetched_at: Option<String>,
+    pub content_fetch_status: String,
+    pub content_fetch_error: Option<String>,
+    pub final_url: Option<String>,
 }
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -82,6 +89,12 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             excerpt      TEXT NOT NULL DEFAULT '',
             content      TEXT NOT NULL DEFAULT '',
             raw_html     TEXT,
+            cleaned_html TEXT,
+            cleaned_markdown TEXT,
+            content_fetched_at TEXT,
+            content_fetch_status TEXT NOT NULL DEFAULT 'pending',
+            content_fetch_error TEXT,
+            final_url    TEXT,
             read_status  INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -92,6 +105,64 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|error| format!("Failed to initialize database schema: {error}"))?;
 
+    ensure_article_content_columns(conn)?;
+
+    Ok(())
+}
+
+fn ensure_article_content_columns(conn: &Connection) -> Result<(), String> {
+    ensure_column_exists(conn, "articles", "cleaned_html", "cleaned_html TEXT")?;
+    ensure_column_exists(
+        conn,
+        "articles",
+        "cleaned_markdown",
+        "cleaned_markdown TEXT",
+    )?;
+    ensure_column_exists(
+        conn,
+        "articles",
+        "content_fetched_at",
+        "content_fetched_at TEXT",
+    )?;
+    ensure_column_exists(
+        conn,
+        "articles",
+        "content_fetch_status",
+        "content_fetch_status TEXT NOT NULL DEFAULT 'pending'",
+    )?;
+    ensure_column_exists(
+        conn,
+        "articles",
+        "content_fetch_error",
+        "content_fetch_error TEXT",
+    )?;
+    ensure_column_exists(conn, "articles", "final_url", "final_url TEXT")?;
+    Ok(())
+}
+
+fn ensure_column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| format!("Failed to inspect table '{table}': {error}"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("Failed to query columns for '{table}': {error}"))?;
+
+    for existing_column in columns {
+        let existing_column =
+            existing_column.map_err(|error| format!("Failed to read column name: {error}"))?;
+        if existing_column == column {
+            return Ok(());
+        }
+    }
+
+    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"), [])
+        .map_err(|error| format!("Failed to add column '{column}' to '{table}': {error}"))?;
     Ok(())
 }
 
@@ -124,6 +195,101 @@ pub(crate) fn find_feed_by_url(conn: &Connection, url: &str) -> Result<Option<Fe
     .map_err(|error| format!("Failed to query feed by URL: {error}"))
 }
 
+pub(crate) fn select_feed_site_url(
+    feed: &feed_rs::model::Feed,
+    opml_site_url: Option<&str>,
+    feed_url: &str,
+) -> Option<String> {
+    feed.links
+        .iter()
+        .find_map(|link| {
+            let rel = link.rel.as_deref().unwrap_or("alternate");
+            rel.eq_ignore_ascii_case("alternate")
+                .then(|| clean_site_url(Some(&link.href), feed_url))
+                .flatten()
+        })
+        .or_else(|| {
+            feed.links.iter().find_map(|link| {
+                let rel = link.rel.as_deref().unwrap_or("alternate");
+                (!rel.eq_ignore_ascii_case("self"))
+                    .then(|| clean_site_url(Some(&link.href), feed_url))
+                    .flatten()
+            })
+        })
+        .or_else(|| clean_site_url(opml_site_url, feed_url))
+        .or_else(|| guess_site_url_from_feed_url(feed_url))
+}
+
+pub(crate) fn clean_site_url(candidate: Option<&str>, feed_url: &str) -> Option<String> {
+    let candidate = candidate.map(str::trim).filter(|value| !value.is_empty())?;
+
+    if urls_match(candidate, feed_url) || looks_like_feed_url(candidate) {
+        return None;
+    }
+
+    Some(candidate.to_string())
+}
+
+pub(crate) fn guess_site_url_from_feed_url(feed_url: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(feed_url).ok()?;
+    let had_query = url.query().is_some();
+    url.set_query(None);
+    url.set_fragment(None);
+
+    let path = url.path().trim_end_matches('/').to_string();
+    let lower_path = path.to_ascii_lowercase();
+    let new_path = if lower_path.ends_with("/feed") {
+        &path[..path.len() - "/feed".len()]
+    } else if lower_path.ends_with("/rss2") {
+        &path[..path.len() - "/rss2".len()]
+    } else if lower_path.ends_with("/atom") {
+        &path[..path.len() - "/atom".len()]
+    } else if lower_path.ends_with("/rss") {
+        &path[..path.len() - "/rss".len()]
+    } else if lower_path.ends_with("/rss/index.xml") {
+        &path[..path.len() - "/rss/index.xml".len()]
+    } else if lower_path.ends_with("/index.xml") {
+        &path[..path.len() - "/index.xml".len()]
+    } else if had_query {
+        path.as_str()
+    } else {
+        return None;
+    };
+
+    url.set_path(if new_path.is_empty() { "/" } else { new_path });
+    Some(url.to_string())
+}
+
+fn urls_match(left: &str, right: &str) -> bool {
+    match (reqwest::Url::parse(left), reqwest::Url::parse(right)) {
+        (Ok(mut left), Ok(mut right)) => {
+            left.set_fragment(None);
+            right.set_fragment(None);
+            left == right
+        }
+        _ => left.trim_end_matches('/') == right.trim_end_matches('/'),
+    }
+}
+
+fn looks_like_feed_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+
+    let path = parsed.path().trim_end_matches('/').to_ascii_lowercase();
+    let has_feed_query = parsed
+        .query_pairs()
+        .any(|(key, value)| key.eq_ignore_ascii_case("feed") || value.eq_ignore_ascii_case("feed"));
+
+    has_feed_query
+        || path.ends_with("/feed")
+        || path.ends_with("/rss")
+        || path.ends_with("/rss2")
+        || path.ends_with("/atom")
+        || path.ends_with(".rss")
+        || path.ends_with(".xml")
+}
+
 pub fn save_articles(
     conn: &Connection,
     feed_id: &str,
@@ -132,8 +298,8 @@ pub fn save_articles(
     let mut saved = 0;
 
     for entry in entries {
-        let url = match entry.links.first() {
-            Some(link) => link.href.clone(),
+        let url = match select_article_url(&entry) {
+            Some(url) => url,
             None => continue,
         };
 
@@ -142,7 +308,7 @@ pub fn save_articles(
         let title = entry
             .title
             .map(|title| title.content)
-            .unwrap_or_else(|| "无标题".to_string());
+            .unwrap_or_else(|| "Untitled".to_string());
         let author = entry.authors.first().map(|author| author.name.clone());
         let published_at = entry.published.map(|date| date.to_rfc3339());
 
@@ -160,25 +326,58 @@ pub fn save_articles(
 
         let content = entry
             .content
-            .and_then(|content| content.body)
+            .as_ref()
+            .and_then(|content| content.body.as_ref())
+            .filter(|body| !body.trim().is_empty())
+            .cloned()
             .unwrap_or_default();
 
-        let result = conn.execute(
-            "INSERT OR IGNORE INTO articles
+        let result = conn
+            .execute(
+                "INSERT INTO articles
                 (id, feed_id, title, url, guid, author, published_at, excerpt, content)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                article_id,
-                feed_id,
-                title,
-                url,
-                guid,
-                author,
-                published_at,
-                excerpt,
-                content
-            ],
-        );
+                params![
+                    article_id,
+                    feed_id,
+                    title,
+                    url,
+                    guid,
+                    author,
+                    published_at,
+                    excerpt,
+                    content
+                ],
+            )
+            .or_else(|insert_error| {
+                if let rusqlite::Error::SqliteFailure(error, _) = &insert_error {
+                    if error.code != rusqlite::ErrorCode::ConstraintViolation {
+                        return Err(insert_error);
+                    }
+                }
+
+                conn.execute(
+                    "UPDATE articles
+                 SET guid = ?1,
+                     title = ?2,
+                     author = ?3,
+                     published_at = ?4,
+                     excerpt = ?5,
+                     content = ?6,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE feed_id = ?7 AND url = ?8",
+                    params![
+                        guid,
+                        title,
+                        author,
+                        published_at,
+                        excerpt,
+                        content,
+                        feed_id,
+                        url
+                    ],
+                )
+            });
 
         match result {
             Ok(1) => saved += 1,
@@ -190,25 +389,41 @@ pub fn save_articles(
     Ok(saved)
 }
 
+fn select_article_url(entry: &feed_rs::model::Entry) -> Option<String> {
+    entry
+        .links
+        .iter()
+        .find(|link| {
+            link.rel
+                .as_deref()
+                .unwrap_or("alternate")
+                .eq_ignore_ascii_case("alternate")
+        })
+        .or_else(|| entry.links.first())
+        .map(|link| link.href.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
 #[tauri::command]
 async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
     let response = reqwest::get(&url)
         .await
-        .map_err(|error| format!("无法访问该 URL: {error}"))?;
+        .map_err(|error| format!("Failed to request feed URL: {error}"))?;
 
     let bytes = response
         .bytes()
         .await
-        .map_err(|error| format!("读取响应失败: {error}"))?;
+        .map_err(|error| format!("Failed to read feed response: {error}"))?;
 
     let parsed = feed_rs::parser::parse(bytes.as_ref())
-        .map_err(|error| format!("无法解析为 RSS/Atom/JSON Feed: {error}"))?;
+        .map_err(|error| format!("Failed to parse RSS/Atom/JSON Feed: {error}"))?;
 
     let title = parsed
         .title
-        .map(|title| title.content)
-        .unwrap_or_else(|| "未命名订阅源".to_string());
-    let site_url = parsed.links.first().map(|link| link.href.clone());
+        .as_ref()
+        .map(|title| title.content.clone())
+        .unwrap_or_else(|| "Untitled feed".to_string());
+    let site_url = select_feed_site_url(&parsed, None, &url);
 
     let conn = open_database(&app)?;
 
@@ -224,7 +439,7 @@ async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
          VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
         params![feed_id, title, url, site_url],
     )
-    .map_err(|error| format!("保存订阅源失败: {error}"))?;
+    .map_err(|error| format!("Failed to save feed: {error}"))?;
 
     save_articles(&conn, &feed_id, parsed.entries)?;
 
@@ -234,7 +449,7 @@ async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
             params![feed_id],
             |row| row.get(0),
         )
-        .map_err(|error| format!("查询未读数失败: {error}"))?;
+        .map_err(|error| format!("Failed to query unread count: {error}"))?;
 
     let last_sync_at = conn
         .query_row(
@@ -264,17 +479,17 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
             params![feed_id],
             |row| row.get(0),
         )
-        .map_err(|_| format!("找不到 feed_id: {feed_id}"))?;
+        .map_err(|_| format!("Feed not found: {feed_id}"))?;
 
     let response = reqwest::get(&feed_url)
         .await
-        .map_err(|error| format!("请求失败: {error}"))?;
+        .map_err(|error| format!("Failed to request feed: {error}"))?;
     let bytes = response
         .bytes()
         .await
-        .map_err(|error| format!("读取失败: {error}"))?;
-    let parsed =
-        feed_rs::parser::parse(bytes.as_ref()).map_err(|error| format!("解析失败: {error}"))?;
+        .map_err(|error| format!("Failed to read feed: {error}"))?;
+    let parsed = feed_rs::parser::parse(bytes.as_ref())
+        .map_err(|error| format!("Failed to parse feed: {error}"))?;
 
     save_articles(&conn, &feed_id, parsed.entries)?;
 
@@ -283,7 +498,7 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
          WHERE id = ?1",
         params![feed_id],
     )
-    .map_err(|error| format!("更新同步时间失败: {error}"))?;
+    .map_err(|error| format!("Failed to update sync time: {error}"))?;
 
     list_articles_by_feed(&conn, Some(&feed_id))
 }
@@ -301,7 +516,7 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
              GROUP BY f.id
              ORDER BY f.title ASC",
         )
-        .map_err(|error| format!("准备查询失败: {error}"))?;
+        .map_err(|error| format!("Failed to prepare feed query: {error}"))?;
 
     let rows = stmt
         .query_map([], |row| {
@@ -314,11 +529,11 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
                 unread: row.get(5)?,
             })
         })
-        .map_err(|error| format!("查询失败: {error}"))?;
+        .map_err(|error| format!("Failed to query feeds: {error}"))?;
 
     let mut feeds = Vec::new();
     for row in rows {
-        feeds.push(row.map_err(|error| format!("读取行失败: {error}"))?);
+        feeds.push(row.map_err(|error| format!("Failed to read feed row: {error}"))?);
     }
     Ok(feeds)
 }
@@ -332,14 +547,18 @@ fn list_articles(app: AppHandle, feed_id: Option<String>) -> Result<Vec<Article>
 fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec<Article>, String> {
     let (sql, param): (String, Option<String>) = match feed_id {
         Some(id) => (
-            "SELECT id, feed_id, title, url, author, published_at, excerpt, content
+            "SELECT id, feed_id, title, url, author, published_at, excerpt, content,
+                    raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                    content_fetch_status, content_fetch_error, final_url
              FROM articles WHERE feed_id = ?1
              ORDER BY published_at DESC, created_at DESC"
                 .to_string(),
             Some(id.to_string()),
         ),
         None => (
-            "SELECT id, feed_id, title, url, author, published_at, excerpt, content
+            "SELECT id, feed_id, title, url, author, published_at, excerpt, content,
+                    raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                    content_fetch_status, content_fetch_error, final_url
              FROM articles
              ORDER BY published_at DESC, created_at DESC"
                 .to_string(),
@@ -349,54 +568,52 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
 
     let mut stmt = conn
         .prepare(&sql)
-        .map_err(|error| format!("准备查询失败: {error}"))?;
+        .map_err(|error| format!("Failed to prepare article query: {error}"))?;
 
     let rows: Vec<Article> = match param {
         Some(param) => {
             let mut result = Vec::new();
             let rows = stmt
-                .query_map(params![param], |row| {
-                    Ok(Article {
-                        id: row.get(0)?,
-                        feed_id: row.get(1)?,
-                        title: row.get(2)?,
-                        url: row.get(3)?,
-                        author: row.get(4)?,
-                        published_at: row.get(5)?,
-                        excerpt: row.get(6)?,
-                        content: row.get(7)?,
-                    })
-                })
-                .map_err(|error| format!("查询失败: {error}"))?;
+                .query_map(params![param], map_article_row)
+                .map_err(|error| format!("Failed to query articles: {error}"))?;
             for row in rows {
-                result.push(row.map_err(|error| format!("读取行失败: {error}"))?);
+                result.push(row.map_err(|error| format!("Failed to read article row: {error}"))?);
             }
             result
         }
         None => {
             let mut result = Vec::new();
             let rows = stmt
-                .query_map([], |row| {
-                    Ok(Article {
-                        id: row.get(0)?,
-                        feed_id: row.get(1)?,
-                        title: row.get(2)?,
-                        url: row.get(3)?,
-                        author: row.get(4)?,
-                        published_at: row.get(5)?,
-                        excerpt: row.get(6)?,
-                        content: row.get(7)?,
-                    })
-                })
-                .map_err(|error| format!("查询失败: {error}"))?;
+                .query_map([], map_article_row)
+                .map_err(|error| format!("Failed to query articles: {error}"))?;
             for row in rows {
-                result.push(row.map_err(|error| format!("读取行失败: {error}"))?);
+                result.push(row.map_err(|error| format!("Failed to read article row: {error}"))?);
             }
             result
         }
     };
 
     Ok(rows)
+}
+
+fn map_article_row(row: &Row<'_>) -> rusqlite::Result<Article> {
+    Ok(Article {
+        id: row.get(0)?,
+        feed_id: row.get(1)?,
+        title: row.get(2)?,
+        url: row.get(3)?,
+        author: row.get(4)?,
+        published_at: row.get(5)?,
+        excerpt: row.get(6)?,
+        content: row.get(7)?,
+        raw_html: row.get(8)?,
+        cleaned_html: row.get(9)?,
+        cleaned_markdown: row.get(10)?,
+        content_fetched_at: row.get(11)?,
+        content_fetch_status: row.get(12)?,
+        content_fetch_error: row.get(13)?,
+        final_url: row.get(14)?,
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
