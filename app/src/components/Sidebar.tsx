@@ -67,11 +67,16 @@ export function Sidebar({
         setRefreshToast({ message: "无更新内容", type: "info" });
       }
     } catch (err) {
-      /* Tauri invoke real error vs pure-frontend mock */
-      if (typeof err === "string" || err instanceof Error) {
-        setRefreshToast({ message: "刷新失败", type: "error" });
-      } else {
+      /* In Tauri, real errors contain meaningful messages.
+         In pure-frontend dev, invoke fails because Tauri core is missing. */
+      const errMsg =
+        typeof err === "string" ? err : err instanceof Error ? err.message : "";
+      if (errMsg.includes("Tauri") || errMsg.includes("invoke")) {
+        /* Pure frontend dev — Tauri core not available, mock success */
         setRefreshToast({ message: "刷新完毕（模拟）", type: "info" });
+      } else {
+        /* Real Tauri error — something went wrong */
+        setRefreshToast({ message: "刷新失败", type: "error" });
       }
     } finally {
       setRefreshingFeedId(null);
