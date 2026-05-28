@@ -28,6 +28,12 @@ button {
   cursor: pointer;
 }
 
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 260px 380px minmax(420px, 1fr);
@@ -187,11 +193,14 @@ button {
   background: #1f6feb;
 }
 
-.search-box {
+.url-fetcher {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
   margin-bottom: 16px;
 }
 
-.search-box input {
+.url-fetcher input {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid #d0d7e2;
@@ -200,7 +209,7 @@ button {
   background: white;
 }
 
-.search-box input:focus {
+.url-fetcher input:focus {
   border-color: #1f6feb;
   box-shadow: 0 0 0 3px rgb(31 111 235 / 12%);
 }
@@ -316,6 +325,10 @@ button {
   letter-spacing: -0.03em;
 }
 
+.reader-content p:first-child {
+  margin-top: 0;
+}
+
 .reader-content blockquote {
   margin: 32px 0 0;
   padding: 18px 22px;
@@ -340,6 +353,16 @@ button {
 
 .source-link:hover {
   text-decoration: underline;
+}
+
+.reader-status {
+  display: grid;
+  padding: 14px 42px;
+  color: #64748b;
+  background: #f8fafc;
+  border-bottom: 1px solid #e5eaf1;
+  font-size: 14px;
+  text-align: center;
 }
 
 @media (max-width: 1100px) {

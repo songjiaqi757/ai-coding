@@ -1,9 +1,13 @@
+import { useState, type FormEvent } from "react";
 import type { Article } from "../types";
 
 type Props = {
   articles: Article[];
   selectedArticleId: string | null;
   isLoading: boolean;
+  isFetchingArticle: boolean;
+  fetchError: string | null;
+  onFetchArticle: (url: string) => void;
   onSelectArticle: (id: string) => void;
 };
 
@@ -27,8 +31,21 @@ export function ArticleList({
   articles,
   selectedArticleId,
   isLoading,
+  isFetchingArticle,
+  fetchError,
+  onFetchArticle,
   onSelectArticle,
 }: Props) {
+  const [articleUrl, setArticleUrl] = useState("");
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const url = articleUrl.trim();
+    if (!url || isFetchingArticle) return;
+    onFetchArticle(url);
+    setArticleUrl("");
+  }
+
   return (
     <section className="article-list">
       <div className="toolbar">
@@ -38,9 +55,23 @@ export function ArticleList({
         </div>
       </div>
 
-      <div className="search-box">
-        <input placeholder="搜索文章..." />
-      </div>
+      <form className="url-fetcher" onSubmit={handleSubmit}>
+        <input
+          placeholder="输入文章 URL..."
+          value={articleUrl}
+          onChange={(event) => setArticleUrl(event.target.value)}
+          disabled={isFetchingArticle}
+        />
+        <button
+          className="primary-button"
+          type="submit"
+          disabled={isFetchingArticle}
+        >
+          {isFetchingArticle ? "抓取中..." : "抓取"}
+        </button>
+      </form>
+
+      {fetchError && <div className="error-box">{fetchError}</div>}
 
       <div className="cards">
         {articles.length === 0 && !isLoading && (

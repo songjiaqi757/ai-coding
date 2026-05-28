@@ -5,6 +5,10 @@ import { ArticleList } from "./components/ArticleList";
 import type { Article, Feed } from "./types";
 import "./App.css";
 
+function hasTauriBackend() {
+  return "__TAURI_INTERNALS__" in window;
+}
+
 function getReaderHtml(article: Article) {
   return (
     article.cleanedHtml?.trim() ||
@@ -94,6 +98,10 @@ function App() {
   const [selectedArticleId, setSelectedArticleId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [readerMessage, setReaderMessage] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [isFetchingArticle, setIsFetchingArticle] = useState(false);
+  const [isCleaningArticle, setIsCleaningArticle] = useState(false);
 
   async function loadData() {
     try {
@@ -120,6 +128,60 @@ function App() {
       setErrorMessage("当前未连接 Tauri 后端，已展示本地示例数据。");
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function handleFetchArticle(url: string) {
+    if (!hasTauriBackend()) {
+      setFetchError("请使用 pnpm tauri dev 启动桌面端后再抓取文章。");
+      return;
+    }
+
+    try {
+      setIsFetchingArticle(true);
+      setFetchError(null);
+      setReaderMessage("正在抓取并清洗文章...");
+
+      const article = await invoke<Article>("fetch_and_clean_article", { url });
+      const [nextFeeds, nextArticles] = await Promise.all([
+        invoke<Feed[]>("list_feeds"),
+        invoke<Article[]>("list_articles", { feedId: null }),
+      ]);
+
+      setFeeds(nextFeeds);
+      setArticles(nextArticles);
+      setSelectedFeedId("all");
+      setSelectedArticleId(article.id);
+      setReaderMessage(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setFetchError(message);
+      setReaderMessage(message);
+    } finally {
+      setIsFetchingArticle(false);
+    }
+  }
+
+  async function handleCleanArticle(articleId: string) {
+    if (!hasTauriBackend()) {
+      setReaderMessage("请使用 pnpm tauri dev 启动桌面端后再清洗文章。");
+      return;
+    }
+
+    try {
+      setIsCleaningArticle(true);
+      setReaderMessage("正在清洗文章...");
+      const article = await invoke<Article>("clean_article", { articleId });
+
+      setArticles((current) =>
+        current.map((item) => (item.id === article.id ? article : item)),
+      );
+      setSelectedArticleId(article.id);
+      setReaderMessage(null);
+    } catch (error) {
+      setReaderMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsCleaningArticle(false);
     }
   }
 
@@ -154,6 +216,9 @@ function App() {
         articles={visibleArticles}
         selectedArticleId={selectedArticle?.id ?? null}
         isLoading={isLoading}
+        isFetchingArticle={isFetchingArticle}
+        fetchError={fetchError}
+        onFetchArticle={handleFetchArticle}
         onSelectArticle={setSelectedArticleId}
       />
       <article className="reader">
@@ -173,6 +238,14 @@ function App() {
                 <h2>{selectedArticle.title}</h2>
               </div>
               <div className="reader-actions">
+                {!selectedArticle.cleanedHtml && (
+                  <button
+                    onClick={() => void handleCleanArticle(selectedArticle.id)}
+                    disabled={isCleaningArticle}
+                  >
+                    {isCleaningArticle ? "清洗中..." : "清洗"}
+                  </button>
+                )}
                 <button onClick={() => alert("Summary Agent 尚未在当前分支接通")}>
                   摘要
                 </button>
@@ -181,6 +254,7 @@ function App() {
                 </button>
               </div>
             </div>
+            {readerMessage && <div className="reader-status">{readerMessage}</div>}
             <div className="reader-content">
               {selectedArticleHtml ? (
                 <div dangerouslySetInnerHTML={{ __html: selectedArticleHtml }} />
