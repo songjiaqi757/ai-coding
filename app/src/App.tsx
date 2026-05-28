@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Sidebar } from "./components/Sidebar";
 import { ArticleList } from "./components/ArticleList";
@@ -102,6 +102,7 @@ function App() {
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [isFetchingArticle, setIsFetchingArticle] = useState(false);
   const [isCleaningArticle, setIsCleaningArticle] = useState(false);
+  const openRequestIdRef = useRef(0);
 
   async function loadData() {
     try {
@@ -162,26 +163,62 @@ function App() {
     }
   }
 
-  async function handleCleanArticle(articleId: string) {
+  async function cleanAndStoreArticle(articleId: string, statusMessage: string) {
     if (!hasTauriBackend()) {
       setReaderMessage("请使用 pnpm tauri dev 启动桌面端后再清洗文章。");
-      return;
+      return null;
     }
 
     try {
       setIsCleaningArticle(true);
-      setReaderMessage("正在清洗文章...");
+      setReaderMessage(statusMessage);
       const article = await invoke<Article>("clean_article", { articleId });
 
       setArticles((current) =>
         current.map((item) => (item.id === article.id ? article : item)),
       );
-      setSelectedArticleId(article.id);
       setReaderMessage(null);
+      return article;
     } catch (error) {
       setReaderMessage(error instanceof Error ? error.message : String(error));
+      return null;
     } finally {
       setIsCleaningArticle(false);
+    }
+  }
+
+  async function handleCleanArticle(articleId: string) {
+    const article = await cleanAndStoreArticle(articleId, "正在清洗文章...");
+    if (article) {
+      setSelectedArticleId(article.id);
+    }
+  }
+
+  async function handleSelectArticle(articleId: string) {
+    const requestId = openRequestIdRef.current + 1;
+    openRequestIdRef.current = requestId;
+    setSelectedArticleId(articleId);
+
+    const article = articles.find((item) => item.id === articleId);
+    if (!article) return;
+
+    if (article.cleanedHtml?.trim() || article.cleanedMarkdown?.trim()) {
+      setReaderMessage(null);
+      return;
+    }
+
+    if (!hasTauriBackend()) {
+      setReaderMessage(null);
+      return;
+    }
+
+    const cleanedArticle = await cleanAndStoreArticle(
+      articleId,
+      "正在打开清洗后的文章...",
+    );
+
+    if (cleanedArticle && openRequestIdRef.current === requestId) {
+      setSelectedArticleId(cleanedArticle.id);
     }
   }
 
@@ -219,7 +256,7 @@ function App() {
         isFetchingArticle={isFetchingArticle}
         fetchError={fetchError}
         onFetchArticle={handleFetchArticle}
-        onSelectArticle={setSelectedArticleId}
+        onSelectArticle={(articleId) => void handleSelectArticle(articleId)}
       />
       <article className="reader">
         {errorMessage && <div className="error-box">{errorMessage}</div>}
