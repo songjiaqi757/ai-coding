@@ -89,12 +89,25 @@ const MOCK_ARTICLES: Article[] = [
 
 function App() {
   const [feeds, setFeeds] = useState<Feed[]>([]);
-  const [articles, setArticles] = useState<Article[]>([]);
+  const [articles, setArticles] = useState<ArticleWithAI[]>([]);
   const [selectedFeedId, setSelectedFeedId] = useState("all");
   const [selectedArticleId, setSelectedArticleId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+<<<<<<< HEAD
+=======
+  // AI feature states
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsForm, setSettingsForm] = useState({ baseUrl: "", apiKey: "", modelName: "" });
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [readView, setReadView] = useState<ReadView>("original");
+  const [targetLang, setTargetLang] = useState("zh");
+
+>>>>>>> 2ef95399824ea16cd6c12648ffa15fe21d04b941
   async function loadData() {
     try {
       setIsLoading(true);
@@ -112,10 +125,17 @@ function App() {
         setSelectedArticleId((current) => current ?? nextArticles[0].id);
       }
     } catch {
+<<<<<<< HEAD
       setFeeds(MOCK_FEEDS);
       setArticles(MOCK_ARTICLES);
       setSelectedArticleId((current) => current ?? MOCK_ARTICLES[0].id);
       setErrorMessage("当前未连接 Tauri 后端，已展示本地示例数据。");
+=======
+      /* Pure frontend dev — Tauri invoke unavailable, fall back to mock */
+      setFeeds(MOCK_FEEDS);
+      setArticles(MOCK_ARTICLES);
+      setSelectedArticleId((current) => current ?? MOCK_ARTICLES[0]?.id ?? null);
+>>>>>>> 2ef95399824ea16cd6c12648ffa15fe21d04b941
     } finally {
       setIsLoading(false);
     }
@@ -125,6 +145,7 @@ function App() {
     void loadData();
   }, []);
 
+<<<<<<< HEAD
   const visibleArticles = useMemo(() => {
     if (selectedFeedId === "all") return articles;
     return articles.filter((article) => article.feedId === selectedFeedId);
@@ -141,6 +162,98 @@ function App() {
   const selectedArticleHtml = selectedArticle
     ? getReaderHtml(selectedArticle)
     : "";
+=======
+  async function loadSettings() {
+    try {
+      const [baseUrl, apiKey, modelName] = await Promise.all([
+        invoke<string | null>("load_setting", { key: "llm_base_url" }),
+        invoke<string | null>("load_setting", { key: "llm_api_key" }),
+        invoke<string | null>("load_setting", { key: "llm_model_name" }),
+      ]);
+      setSettingsForm({
+        baseUrl: baseUrl ?? "",
+        apiKey: apiKey ?? "",
+        modelName: modelName ?? "",
+      });
+    } catch {
+      // Settings not configured yet
+    }
+  }
+
+  useEffect(() => {
+    if (showSettings) {
+      void loadSettings();
+    }
+  }, [showSettings]);
+
+  async function handleSaveSettings() {
+    try {
+      setIsSavingSettings(true);
+      await Promise.all([
+        invoke("save_setting", { key: "llm_base_url", value: settingsForm.baseUrl }),
+        invoke("save_setting", { key: "llm_api_key", value: settingsForm.apiKey }),
+        invoke("save_setting", { key: "llm_model_name", value: settingsForm.modelName }),
+      ]);
+      setShowSettings(false);
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSavingSettings(false);
+    }
+  }
+>>>>>>> 2ef95399824ea16cd6c12648ffa15fe21d04b941
+
+  async function handleSummarize(force = false) {
+    if (!selectedArticleId) return;
+    try {
+      setIsSummarizing(true);
+      setAiError(null);
+      const summary = await invoke<string>("summarize_article", {
+        articleId: selectedArticleId,
+        force,
+      });
+      setArticles((prev) =>
+        prev.map((a) => (a.id === selectedArticleId ? { ...a, summary } : a)),
+      );
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSummarizing(false);
+    }
+  }
+
+  async function handleTranslate() {
+    if (!selectedArticleId) return;
+    try {
+      setIsTranslating(true);
+      setAiError(null);
+      const translation = await invoke<string>("translate_article", {
+        articleId: selectedArticleId,
+        targetLang,
+      });
+      setArticles((prev) =>
+        prev.map((a) => (a.id === selectedArticleId ? { ...a, translation } : a)),
+      );
+      setReadView("translation");
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsTranslating(false);
+    }
+  }
+
+  const visibleArticles = useMemo(() => {
+    if (selectedFeedId === "all") return articles;
+    return articles.filter((a) => a.feedId === selectedFeedId);
+  }, [articles, selectedFeedId]);
+
+  const selectedArticle = useMemo(
+    () =>
+      articles.find((a) => a.id === selectedArticleId) ??
+      visibleArticles[0] ??
+      null,
+    [articles, selectedArticleId, visibleArticles],
+  );
 
   return (
     <main className="app-shell">
@@ -156,6 +269,10 @@ function App() {
         isLoading={isLoading}
         onSelectArticle={setSelectedArticleId}
       />
+<<<<<<< HEAD
+=======
+
+>>>>>>> 2ef95399824ea16cd6c12648ffa15fe21d04b941
       <article className="reader">
         {errorMessage && <div className="error-box">{errorMessage}</div>}
         {selectedArticle ? (
@@ -173,6 +290,7 @@ function App() {
                 <h2>{selectedArticle.title}</h2>
               </div>
               <div className="reader-actions">
+<<<<<<< HEAD
                 <button onClick={() => alert("Summary Agent - Phase 5")}>
                   摘要
                 </button>
@@ -197,6 +315,85 @@ function App() {
               >
                 打开原文
               </a>
+=======
+                <button
+                  onClick={() => handleSummarize()}
+                  disabled={isSummarizing}
+                  className={isSummarizing ? "action-loading" : ""}
+                >
+                  {isSummarizing ? "Summarizing..." : selectedArticle.summary ? "Regenerate Summary" : "Summary"}
+                </button>
+                <button
+                  onClick={() => handleTranslate()}
+                  disabled={isTranslating}
+                  className={isTranslating ? "action-loading" : ""}
+                >
+                  {isTranslating ? "Translating..." : "Translate"}
+                </button>
+                <select
+                  className="lang-select"
+                  value={targetLang}
+                  onChange={(e) => setTargetLang(e.target.value)}
+                >
+                  <option value="zh">Chinese</option>
+                  <option value="en">English</option>
+                  <option value="ja">Japanese</option>
+                  <option value="ko">Korean</option>
+                </select>
+                <button
+                  className="settings-toggle-btn"
+                  onClick={() => setShowSettings(true)}
+                  title="LLM Settings"
+                >
+                  &#9881;
+                </button>
+              </div>
+            </div>
+
+            {aiError && <div className="error-box">{aiError}</div>}
+
+            {selectedArticle.summary && (
+              <div className="ai-result-section">
+                <div className="ai-result-label">Summary</div>
+                <div className="ai-result-content">{selectedArticle.summary}</div>
+              </div>
+            )}
+
+            {selectedArticle.translation && (
+              <div className="view-tabs">
+                <button
+                  className={readView === "original" ? "view-tab active" : "view-tab"}
+                  onClick={() => setReadView("original")}
+                >
+                  Original
+                </button>
+                <button
+                  className={readView === "translation" ? "view-tab active" : "view-tab"}
+                  onClick={() => setReadView("translation")}
+                >
+                  Translation
+                </button>
+                <button
+                  className={readView === "bilingual" ? "view-tab active" : "view-tab"}
+                  onClick={() => setReadView("bilingual")}
+                >
+                  Bilingual
+                </button>
+              </div>
+            )}
+
+            <div className="reader-content">
+              {(readView === "original" || readView === "bilingual") && (
+                <div dangerouslySetInnerHTML={{ __html: selectedArticle.content }} />
+              )}
+
+              {(readView === "translation" || readView === "bilingual") && selectedArticle.translation && (
+                <div className="translation-block">
+                  <h3>Translation</h3>
+                  <p>{selectedArticle.translation}</p>
+                </div>
+              )}
+>>>>>>> 2ef95399824ea16cd6c12648ffa15fe21d04b941
             </div>
           </>
         ) : (
@@ -205,6 +402,55 @@ function App() {
           </div>
         )}
       </article>
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h2>LLM Settings</h2>
+            <p className="modal-desc">
+              Configure your LLM provider. Supports OpenAI, DeepSeek, Ollama, and any OpenAI-compatible API.
+            </p>
+
+            <div className="settings-form">
+              <label>
+                API Base URL
+                <input
+                  placeholder="https://api.openai.com or http://localhost:11434"
+                  value={settingsForm.baseUrl}
+                  onChange={(e) => setSettingsForm((f) => ({ ...f, baseUrl: e.target.value }))}
+                />
+              </label>
+
+              <label>
+                API Key
+                <input
+                  type="password"
+                  placeholder="sk-... (leave empty for Ollama)"
+                  value={settingsForm.apiKey}
+                  onChange={(e) => setSettingsForm((f) => ({ ...f, apiKey: e.target.value }))}
+                />
+              </label>
+
+              <label>
+                Model Name
+                <input
+                  placeholder="gpt-3.5-turbo, deepseek-chat, llama3"
+                  value={settingsForm.modelName}
+                  onChange={(e) => setSettingsForm((f) => ({ ...f, modelName: e.target.value }))}
+                />
+              </label>
+
+              <div className="modal-actions">
+                <button className="primary-button" onClick={handleSaveSettings} disabled={isSavingSettings}>
+                  {isSavingSettings ? "Saving..." : "Save"}
+                </button>
+                <button onClick={() => setShowSettings(false)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

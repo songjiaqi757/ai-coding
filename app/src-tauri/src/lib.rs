@@ -1,5 +1,9 @@
 mod opml;
 
+mod llm_provider;
+mod opml;
+
+use llm_provider::LlmConfig;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use std::fs;
@@ -36,6 +40,8 @@ pub struct Article {
     pub content_fetch_status: String,
     pub content_fetch_error: Option<String>,
     pub final_url: Option<String>,
+    summary: Option<String>,
+    translation: Option<String>,
 }
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -96,14 +102,57 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             content_fetch_error TEXT,
             final_url    TEXT,
             read_status  INTEGER NOT NULL DEFAULT 0,
+            summary      TEXT,
+            translation  TEXT,
             created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(feed_id) REFERENCES feeds(id),
             UNIQUE(feed_id, url)
         );
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         ",
     )
     .map_err(|error| format!("Failed to initialize database schema: {error}"))?;
+
+    // Migration: add columns to existing databases that lack them
+    let migrations = [
+        "ALTER TABLE feeds ADD COLUMN url TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE feeds ADD COLUMN site_url TEXT",
+        "ALTER TABLE feeds ADD COLUMN last_sync_at TEXT",
+        "ALTER TABLE feeds ADD COLUMN created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE feeds ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE articles ADD COLUMN url TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE articles ADD COLUMN guid TEXT",
+        "ALTER TABLE articles ADD COLUMN author TEXT",
+        "ALTER TABLE articles ADD COLUMN raw_html TEXT",
+        "ALTER TABLE articles ADD COLUMN summary TEXT",
+        "ALTER TABLE articles ADD COLUMN translation TEXT",
+    ];
+    for sql in &migrations {
+        let _ = conn.execute(sql, []);
+    }
+
+    // Migration: add columns to existing databases that lack them
+    let migrations = [
+        "ALTER TABLE feeds ADD COLUMN url TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE feeds ADD COLUMN site_url TEXT",
+        "ALTER TABLE feeds ADD COLUMN last_sync_at TEXT",
+        "ALTER TABLE feeds ADD COLUMN created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE feeds ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE articles ADD COLUMN url TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE articles ADD COLUMN guid TEXT",
+        "ALTER TABLE articles ADD COLUMN author TEXT",
+        "ALTER TABLE articles ADD COLUMN raw_html TEXT",
+        "ALTER TABLE articles ADD COLUMN summary TEXT",
+        "ALTER TABLE articles ADD COLUMN translation TEXT",
+    ];
+    for sql in &migrations {
+        let _ = conn.execute(sql, []);
+    }
 
     ensure_article_content_columns(conn)?;
 
@@ -326,10 +375,7 @@ pub fn save_articles(
 
         let content = entry
             .content
-            .as_ref()
-            .and_then(|content| content.body.as_ref())
-            .filter(|body| !body.trim().is_empty())
-            .cloned()
+            .and_then(|c| c.body)
             .unwrap_or_default();
 
         let result = conn
@@ -337,52 +383,14 @@ pub fn save_articles(
                 "INSERT INTO articles
                 (id, feed_id, title, url, guid, author, published_at, excerpt, content)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    article_id,
-                    feed_id,
-                    title,
-                    url,
-                    guid,
-                    author,
-                    published_at,
-                    excerpt,
-                    content
-                ],
-            )
-            .or_else(|insert_error| {
-                if let rusqlite::Error::SqliteFailure(error, _) = &insert_error {
-                    if error.code != rusqlite::ErrorCode::ConstraintViolation {
-                        return Err(insert_error);
-                    }
-                }
+            params![
+                article_id, feed_id, title, url, _guid,
+                author, published_at, excerpt, content
+            ],
+        );
 
-                conn.execute(
-                    "UPDATE articles
-                 SET guid = ?1,
-                     title = ?2,
-                     author = ?3,
-                     published_at = ?4,
-                     excerpt = ?5,
-                     content = ?6,
-                     updated_at = CURRENT_TIMESTAMP
-                 WHERE feed_id = ?7 AND url = ?8",
-                    params![
-                        guid,
-                        title,
-                        author,
-                        published_at,
-                        excerpt,
-                        content,
-                        feed_id,
-                        url
-                    ],
-                )
-            });
-
-        match result {
-            Ok(1) => saved += 1,
-            Ok(_) => {}
-            Err(error) => return Err(format!("Failed to save article: {error}")),
+        if let Ok(1) = result {
+            saved += 1;
         }
     }
 
@@ -487,9 +495,9 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
     let bytes = response
         .bytes()
         .await
-        .map_err(|error| format!("Failed to read feed: {error}"))?;
+        .map_err(|e| format!("读取失败: {e}"))?;
     let parsed = feed_rs::parser::parse(bytes.as_ref())
-        .map_err(|error| format!("Failed to parse feed: {error}"))?;
+        .map_err(|e| format!("解析失败: {e}"))?;
 
     save_articles(&conn, &feed_id, parsed.entries)?;
 
@@ -501,6 +509,37 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
     .map_err(|error| format!("Failed to update sync time: {error}"))?;
 
     list_articles_by_feed(&conn, Some(&feed_id))
+}
+
+fn load_setting_value(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .map(Some)
+    .or_else(|e| {
+        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+            Ok(None)
+        } else {
+            Err(format!("Failed to load setting '{key}': {e}"))
+        }
+    })
+}
+
+fn get_llm_config_from_db(conn: &Connection) -> Result<LlmConfig, String> {
+    let base_url = load_setting_value(conn, "llm_base_url")?
+        .ok_or("LLM Base URL not configured. Please set it in Settings.".to_string())?;
+    let api_key = load_setting_value(conn, "llm_api_key")?
+        .ok_or("LLM API Key not configured. Please set it in Settings.".to_string())?;
+    let model_name = load_setting_value(conn, "llm_model_name")?
+        .ok_or("LLM Model Name not configured. Please set it in Settings.".to_string())?;
+
+    Ok(LlmConfig {
+        base_url,
+        api_key,
+        model_name,
+    })
 }
 
 #[tauri::command]
@@ -547,18 +586,14 @@ fn list_articles(app: AppHandle, feed_id: Option<String>) -> Result<Vec<Article>
 fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec<Article>, String> {
     let (sql, param): (String, Option<String>) = match feed_id {
         Some(id) => (
-            "SELECT id, feed_id, title, url, author, published_at, excerpt, content,
-                    raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                    content_fetch_status, content_fetch_error, final_url
+            "SELECT id, feed_id, title, url, author, published_at, excerpt, content
              FROM articles WHERE feed_id = ?1
              ORDER BY published_at DESC, created_at DESC"
                 .to_string(),
             Some(id.to_string()),
         ),
         None => (
-            "SELECT id, feed_id, title, url, author, published_at, excerpt, content,
-                    raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                    content_fetch_status, content_fetch_error, final_url
+            "SELECT id, feed_id, title, url, author, published_at, excerpt, content
              FROM articles
              ORDER BY published_at DESC, created_at DESC"
                 .to_string(),
@@ -566,16 +601,23 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
         ),
     };
 
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|error| format!("Failed to prepare article query: {error}"))?;
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("准备查询失败: {e}"))?;
 
     let rows: Vec<Article> = match param {
         Some(param) => {
             let mut result = Vec::new();
-            let rows = stmt
-                .query_map(params![param], map_article_row)
-                .map_err(|error| format!("Failed to query articles: {error}"))?;
+            let rows = stmt.query_map(params![p], |row| {
+                Ok(Article {
+                    id: row.get(0)?,
+                    feed_id: row.get(1)?,
+                    title: row.get(2)?,
+                    url: row.get(3)?,
+                    author: row.get(4)?,
+                    published_at: row.get(5)?,
+                    excerpt: row.get(6)?,
+                    content: row.get(7)?,
+                })
+            }).map_err(|e| format!("查询失败: {e}"))?;
             for row in rows {
                 result.push(row.map_err(|error| format!("Failed to read article row: {error}"))?);
             }
@@ -583,9 +625,18 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
         }
         None => {
             let mut result = Vec::new();
-            let rows = stmt
-                .query_map([], map_article_row)
-                .map_err(|error| format!("Failed to query articles: {error}"))?;
+            let rows = stmt.query_map([], |row| {
+                Ok(Article {
+                    id: row.get(0)?,
+                    feed_id: row.get(1)?,
+                    title: row.get(2)?,
+                    url: row.get(3)?,
+                    author: row.get(4)?,
+                    published_at: row.get(5)?,
+                    excerpt: row.get(6)?,
+                    content: row.get(7)?,
+                })
+            }).map_err(|e| format!("查询失败: {e}"))?;
             for row in rows {
                 result.push(row.map_err(|error| format!("Failed to read article row: {error}"))?);
             }
@@ -596,25 +647,7 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
     Ok(rows)
 }
 
-fn map_article_row(row: &Row<'_>) -> rusqlite::Result<Article> {
-    Ok(Article {
-        id: row.get(0)?,
-        feed_id: row.get(1)?,
-        title: row.get(2)?,
-        url: row.get(3)?,
-        author: row.get(4)?,
-        published_at: row.get(5)?,
-        excerpt: row.get(6)?,
-        content: row.get(7)?,
-        raw_html: row.get(8)?,
-        cleaned_html: row.get(9)?,
-        cleaned_markdown: row.get(10)?,
-        content_fetched_at: row.get(11)?,
-        content_fetch_status: row.get(12)?,
-        content_fetch_error: row.get(13)?,
-        final_url: row.get(14)?,
-    })
-}
+// mod opml;  // TODO: 取消注释 when Person C submits opml.rs
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -626,8 +659,7 @@ pub fn run() {
             list_articles,
             add_feed,
             refresh_feed,
-            crate::opml::import_opml,
-            crate::opml::export_opml,
+            // crate::opml::import_opml,  // TODO: 取消注释 when Person C submits opml.rs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
