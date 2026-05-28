@@ -325,6 +325,23 @@ button {
   color: #37517a;
 }
 
+.reader-empty-content {
+  color: #64748b;
+}
+
+.source-link {
+  display: inline-flex;
+  margin-top: 28px;
+  color: #1f6feb;
+  font-size: 15px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.source-link:hover {
+  text-decoration: underline;
+}
+
 @media (max-width: 1100px) {
   .app-shell {
     grid-template-columns: 220px 320px minmax(360px, 1fr);
@@ -356,6 +373,145 @@ button {
   place-items: center;
   color: #64748b;
   font-size: 16px;
+}
+
+/* Phase 2: Sidebar styles */
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.section-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.icon-button {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #64748b;
+  font-size: 16px;
+  display: grid;
+  place-items: center;
+}
+
+.icon-button:hover {
+  background: #e2e8f0;
+}
+
+.icon-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.opml-status {
+  padding: 8px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  color: #1e3a8a;
+  background: #eff6ff;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.opml-status.error {
+  border-color: #fecaca;
+  color: #991b1b;
+  background: #fef2f2;
+}
+
+.feed-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.feed-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refresh-button {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 14px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  display: grid;
+  place-items: center;
+}
+
+.feed-item:hover .refresh-button {
+  opacity: 1;
+}
+
+/* Phase 2: Add feed dialog */
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 30%);
+  display: grid;
+  place-items: center;
+  z-index: 100;
+}
+
+.dialog {
+  width: 420px;
+  padding: 28px;
+  border-radius: 20px;
+  background: white;
+  box-shadow: 0 24px 64px rgb(0 0 0 / 18%);
+}
+
+.dialog h3 {
+  margin: 0 0 18px;
+  font-size: 20px;
+  letter-spacing: -0.03em;
+}
+
+.dialog input {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #d0d7e2;
+  border-radius: 12px;
+  outline: none;
+  font-size: 14px;
+}
+
+.dialog input:focus {
+  border-color: #1f6feb;
+  box-shadow: 0 0 0 3px rgb(31 111 235 / 12%);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.error-text {
+  margin: 8px 0 0;
+  color: #dc2626;
+  font-size: 13px;
+}
+
+.empty-state {
+  padding: 40px 0;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 14px;
 }
 
 /* ═══════════════════════════════════════════════

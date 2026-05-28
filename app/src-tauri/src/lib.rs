@@ -1,8 +1,10 @@
+mod opml;
+
 mod llm_provider;
 mod opml;
 
 use llm_provider::LlmConfig;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
@@ -31,6 +33,13 @@ pub struct Article {
     pub published_at: Option<String>,
     pub excerpt: String,
     pub content: String,
+    pub raw_html: Option<String>,
+    pub cleaned_html: Option<String>,
+    pub cleaned_markdown: Option<String>,
+    pub content_fetched_at: Option<String>,
+    pub content_fetch_status: String,
+    pub content_fetch_error: Option<String>,
+    pub final_url: Option<String>,
     summary: Option<String>,
     translation: Option<String>,
 }
@@ -52,6 +61,9 @@ pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
     let conn = Connection::open(path)
         .map_err(|error| format!("Failed to open SQLite database: {error}"))?;
 
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| format!("Failed to enable SQLite foreign keys: {error}"))?;
+
     init_schema(&conn)?;
     seed_database(&conn)?;
 
@@ -62,14 +74,14 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS feeds (
-            id          TEXT PRIMARY KEY,
-            title       TEXT NOT NULL,
-            url         TEXT NOT NULL UNIQUE,
-            site_url    TEXT,
-            unread      INTEGER NOT NULL DEFAULT 0,
+            id           TEXT PRIMARY KEY,
+            title        TEXT NOT NULL,
+            url          TEXT NOT NULL UNIQUE,
+            site_url     TEXT,
+            unread       INTEGER NOT NULL DEFAULT 0,
             last_sync_at TEXT,
-            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS articles (
@@ -83,6 +95,12 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             excerpt      TEXT NOT NULL DEFAULT '',
             content      TEXT NOT NULL DEFAULT '',
             raw_html     TEXT,
+            cleaned_html TEXT,
+            cleaned_markdown TEXT,
+            content_fetched_at TEXT,
+            content_fetch_status TEXT NOT NULL DEFAULT 'pending',
+            content_fetch_error TEXT,
+            final_url    TEXT,
             read_status  INTEGER NOT NULL DEFAULT 0,
             summary      TEXT,
             translation  TEXT,
@@ -118,11 +136,207 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         let _ = conn.execute(sql, []);
     }
 
+    // Migration: add columns to existing databases that lack them
+    let migrations = [
+        "ALTER TABLE feeds ADD COLUMN url TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE feeds ADD COLUMN site_url TEXT",
+        "ALTER TABLE feeds ADD COLUMN last_sync_at TEXT",
+        "ALTER TABLE feeds ADD COLUMN created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE feeds ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE articles ADD COLUMN url TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE articles ADD COLUMN guid TEXT",
+        "ALTER TABLE articles ADD COLUMN author TEXT",
+        "ALTER TABLE articles ADD COLUMN raw_html TEXT",
+        "ALTER TABLE articles ADD COLUMN summary TEXT",
+        "ALTER TABLE articles ADD COLUMN translation TEXT",
+    ];
+    for sql in &migrations {
+        let _ = conn.execute(sql, []);
+    }
+
+    ensure_article_content_columns(conn)?;
+
+    Ok(())
+}
+
+fn ensure_article_content_columns(conn: &Connection) -> Result<(), String> {
+    ensure_column_exists(conn, "articles", "cleaned_html", "cleaned_html TEXT")?;
+    ensure_column_exists(
+        conn,
+        "articles",
+        "cleaned_markdown",
+        "cleaned_markdown TEXT",
+    )?;
+    ensure_column_exists(
+        conn,
+        "articles",
+        "content_fetched_at",
+        "content_fetched_at TEXT",
+    )?;
+    ensure_column_exists(
+        conn,
+        "articles",
+        "content_fetch_status",
+        "content_fetch_status TEXT NOT NULL DEFAULT 'pending'",
+    )?;
+    ensure_column_exists(
+        conn,
+        "articles",
+        "content_fetch_error",
+        "content_fetch_error TEXT",
+    )?;
+    ensure_column_exists(conn, "articles", "final_url", "final_url TEXT")?;
+    Ok(())
+}
+
+fn ensure_column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| format!("Failed to inspect table '{table}': {error}"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("Failed to query columns for '{table}': {error}"))?;
+
+    for existing_column in columns {
+        let existing_column =
+            existing_column.map_err(|error| format!("Failed to read column name: {error}"))?;
+        if existing_column == column {
+            return Ok(());
+        }
+    }
+
+    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"), [])
+        .map_err(|error| format!("Failed to add column '{column}' to '{table}': {error}"))?;
     Ok(())
 }
 
 fn seed_database(_conn: &Connection) -> Result<(), String> {
     Ok(())
+}
+
+pub(crate) fn find_feed_by_url(conn: &Connection, url: &str) -> Result<Option<Feed>, String> {
+    conn.query_row(
+        "SELECT f.id, f.title, f.url, f.site_url, f.last_sync_at,
+                COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread
+         FROM feeds f
+         LEFT JOIN articles a ON a.feed_id = f.id
+         WHERE f.url = ?1
+         GROUP BY f.id, f.title, f.url, f.site_url, f.last_sync_at
+         LIMIT 1",
+        params![url],
+        |row| {
+            Ok(Feed {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                url: row.get(2)?,
+                site_url: row.get(3)?,
+                last_sync_at: row.get(4)?,
+                unread: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| format!("Failed to query feed by URL: {error}"))
+}
+
+pub(crate) fn select_feed_site_url(
+    feed: &feed_rs::model::Feed,
+    opml_site_url: Option<&str>,
+    feed_url: &str,
+) -> Option<String> {
+    feed.links
+        .iter()
+        .find_map(|link| {
+            let rel = link.rel.as_deref().unwrap_or("alternate");
+            rel.eq_ignore_ascii_case("alternate")
+                .then(|| clean_site_url(Some(&link.href), feed_url))
+                .flatten()
+        })
+        .or_else(|| {
+            feed.links.iter().find_map(|link| {
+                let rel = link.rel.as_deref().unwrap_or("alternate");
+                (!rel.eq_ignore_ascii_case("self"))
+                    .then(|| clean_site_url(Some(&link.href), feed_url))
+                    .flatten()
+            })
+        })
+        .or_else(|| clean_site_url(opml_site_url, feed_url))
+        .or_else(|| guess_site_url_from_feed_url(feed_url))
+}
+
+pub(crate) fn clean_site_url(candidate: Option<&str>, feed_url: &str) -> Option<String> {
+    let candidate = candidate.map(str::trim).filter(|value| !value.is_empty())?;
+
+    if urls_match(candidate, feed_url) || looks_like_feed_url(candidate) {
+        return None;
+    }
+
+    Some(candidate.to_string())
+}
+
+pub(crate) fn guess_site_url_from_feed_url(feed_url: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(feed_url).ok()?;
+    let had_query = url.query().is_some();
+    url.set_query(None);
+    url.set_fragment(None);
+
+    let path = url.path().trim_end_matches('/').to_string();
+    let lower_path = path.to_ascii_lowercase();
+    let new_path = if lower_path.ends_with("/feed") {
+        &path[..path.len() - "/feed".len()]
+    } else if lower_path.ends_with("/rss2") {
+        &path[..path.len() - "/rss2".len()]
+    } else if lower_path.ends_with("/atom") {
+        &path[..path.len() - "/atom".len()]
+    } else if lower_path.ends_with("/rss") {
+        &path[..path.len() - "/rss".len()]
+    } else if lower_path.ends_with("/rss/index.xml") {
+        &path[..path.len() - "/rss/index.xml".len()]
+    } else if lower_path.ends_with("/index.xml") {
+        &path[..path.len() - "/index.xml".len()]
+    } else if had_query {
+        path.as_str()
+    } else {
+        return None;
+    };
+
+    url.set_path(if new_path.is_empty() { "/" } else { new_path });
+    Some(url.to_string())
+}
+
+fn urls_match(left: &str, right: &str) -> bool {
+    match (reqwest::Url::parse(left), reqwest::Url::parse(right)) {
+        (Ok(mut left), Ok(mut right)) => {
+            left.set_fragment(None);
+            right.set_fragment(None);
+            left == right
+        }
+        _ => left.trim_end_matches('/') == right.trim_end_matches('/'),
+    }
+}
+
+fn looks_like_feed_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+
+    let path = parsed.path().trim_end_matches('/').to_ascii_lowercase();
+    let has_feed_query = parsed
+        .query_pairs()
+        .any(|(key, value)| key.eq_ignore_ascii_case("feed") || value.eq_ignore_ascii_case("feed"));
+
+    has_feed_query
+        || path.ends_with("/feed")
+        || path.ends_with("/rss")
+        || path.ends_with("/rss2")
+        || path.ends_with("/atom")
+        || path.ends_with(".rss")
+        || path.ends_with(".xml")
 }
 
 pub fn save_articles(
@@ -133,48 +347,45 @@ pub fn save_articles(
     let mut saved = 0;
 
     for entry in entries {
-        let url = match entry.links.first() {
-            Some(link) => link.href.clone(),
+        let url = match select_article_url(&entry) {
+            Some(url) => url,
             None => continue,
         };
 
         let article_id = Uuid::new_v4().to_string();
-        let _guid = Some(entry.id.clone());
+        let guid = Some(entry.id.clone());
         let title = entry
             .title
-            .map(|t| t.content)
-            .unwrap_or_else(|| "无标题".to_string());
-        let author = entry.authors.first().map(|a| a.name.clone());
-        let published_at = entry.published.map(|dt| dt.to_rfc3339());
+            .map(|title| title.content)
+            .unwrap_or_else(|| "Untitled".to_string());
+        let author = entry.authors.first().map(|author| author.name.clone());
+        let published_at = entry.published.map(|date| date.to_rfc3339());
 
         let excerpt = entry
             .summary
-            .map(|s| s.content)
+            .map(|summary| summary.content)
             .or_else(|| {
                 entry
                     .content
                     .as_ref()
-                    .and_then(|c| c.body.as_ref())
-                    .map(|b| b.chars().take(200).collect())
+                    .and_then(|content| content.body.as_ref())
+                    .map(|body| body.chars().take(200).collect())
             })
             .unwrap_or_default();
 
-        let content = entry.content.and_then(|c| c.body).unwrap_or_default();
+        let content = entry
+            .content
+            .and_then(|c| c.body)
+            .unwrap_or_default();
 
-        let result = conn.execute(
-            "INSERT OR IGNORE INTO articles
+        let result = conn
+            .execute(
+                "INSERT INTO articles
                 (id, feed_id, title, url, guid, author, published_at, excerpt, content)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                article_id,
-                feed_id,
-                title,
-                url,
-                _guid,
-                author,
-                published_at,
-                excerpt,
-                content
+                article_id, feed_id, title, url, _guid,
+                author, published_at, excerpt, content
             ],
         );
 
@@ -186,33 +397,57 @@ pub fn save_articles(
     Ok(saved)
 }
 
+fn select_article_url(entry: &feed_rs::model::Entry) -> Option<String> {
+    entry
+        .links
+        .iter()
+        .find(|link| {
+            link.rel
+                .as_deref()
+                .unwrap_or("alternate")
+                .eq_ignore_ascii_case("alternate")
+        })
+        .or_else(|| entry.links.first())
+        .map(|link| link.href.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
 #[tauri::command]
 async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
     let response = reqwest::get(&url)
         .await
-        .map_err(|e| format!("无法访问该 URL: {e}"))?;
+        .map_err(|error| format!("Failed to request feed URL: {error}"))?;
 
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| format!("读取响应失败: {e}"))?;
+        .map_err(|error| format!("Failed to read feed response: {error}"))?;
 
     let parsed = feed_rs::parser::parse(bytes.as_ref())
-        .map_err(|e| format!("无法解析为 RSS/Atom/JSON Feed: {e}"))?;
+        .map_err(|error| format!("Failed to parse RSS/Atom/JSON Feed: {error}"))?;
 
-    let feed_id = Uuid::new_v4().to_string();
     let title = parsed
         .title
-        .map(|t| t.content)
-        .unwrap_or_else(|| "未命名订阅源".to_string());
-    let site_url = parsed.links.first().map(|l| l.href.clone());
+        .as_ref()
+        .map(|title| title.content.clone())
+        .unwrap_or_else(|| "Untitled feed".to_string());
+    let site_url = select_feed_site_url(&parsed, None, &url);
 
     let conn = open_database(&app)?;
+
+    if let Some(existing_feed) = find_feed_by_url(&conn, &url)? {
+        save_articles(&conn, &existing_feed.id, parsed.entries)?;
+        return find_feed_by_url(&conn, &url)?
+            .ok_or_else(|| "Feed disappeared after saving articles".to_string());
+    }
+
+    let feed_id = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT OR IGNORE INTO feeds (id, title, url, site_url) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO feeds (id, title, url, site_url, last_sync_at)
+         VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
         params![feed_id, title, url, site_url],
     )
-    .map_err(|e| format!("保存订阅源失败: {e}"))?;
+    .map_err(|error| format!("Failed to save feed: {error}"))?;
 
     save_articles(&conn, &feed_id, parsed.entries)?;
 
@@ -222,7 +457,15 @@ async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
             params![feed_id],
             |row| row.get(0),
         )
-        .map_err(|e| format!("查询未读数失败: {e}"))?;
+        .map_err(|error| format!("Failed to query unread count: {error}"))?;
+
+    let last_sync_at = conn
+        .query_row(
+            "SELECT last_sync_at FROM feeds WHERE id = ?1",
+            params![feed_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Failed to query sync time: {error}"))?;
 
     Ok(Feed {
         id: feed_id,
@@ -230,7 +473,7 @@ async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
         url,
         site_url,
         unread,
-        last_sync_at: None,
+        last_sync_at,
     })
 }
 
@@ -244,16 +487,17 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
             params![feed_id],
             |row| row.get(0),
         )
-        .map_err(|_| format!("找不到 feed_id: {feed_id}"))?;
+        .map_err(|_| format!("Feed not found: {feed_id}"))?;
 
     let response = reqwest::get(&feed_url)
         .await
-        .map_err(|e| format!("请求失败: {e}"))?;
+        .map_err(|error| format!("Failed to request feed: {error}"))?;
     let bytes = response
         .bytes()
         .await
         .map_err(|e| format!("读取失败: {e}"))?;
-    let parsed = feed_rs::parser::parse(bytes.as_ref()).map_err(|e| format!("解析失败: {e}"))?;
+    let parsed = feed_rs::parser::parse(bytes.as_ref())
+        .map_err(|e| format!("解析失败: {e}"))?;
 
     save_articles(&conn, &feed_id, parsed.entries)?;
 
@@ -262,7 +506,7 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
          WHERE id = ?1",
         params![feed_id],
     )
-    .map_err(|e| format!("更新同步时间失败: {e}"))?;
+    .map_err(|error| format!("Failed to update sync time: {error}"))?;
 
     list_articles_by_feed(&conn, Some(&feed_id))
 }
@@ -311,7 +555,7 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
              GROUP BY f.id
              ORDER BY f.title ASC",
         )
-        .map_err(|e| format!("准备查询失败: {e}"))?;
+        .map_err(|error| format!("Failed to prepare feed query: {error}"))?;
 
     let rows = stmt
         .query_map([], |row| {
@@ -324,11 +568,11 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
                 unread: row.get(5)?,
             })
         })
-        .map_err(|e| format!("查询失败: {e}"))?;
+        .map_err(|error| format!("Failed to query feeds: {error}"))?;
 
     let mut feeds = Vec::new();
     for row in rows {
-        feeds.push(row.map_err(|e| format!("读取行失败: {e}"))?);
+        feeds.push(row.map_err(|error| format!("Failed to read feed row: {error}"))?);
     }
     Ok(feeds)
 }
@@ -342,67 +586,59 @@ fn list_articles(app: AppHandle, feed_id: Option<String>) -> Result<Vec<Article>
 fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec<Article>, String> {
     let (sql, param): (String, Option<String>) = match feed_id {
         Some(id) => (
-            "SELECT id, feed_id, title, url, author, published_at, excerpt, content, summary, translation
+            "SELECT id, feed_id, title, url, author, published_at, excerpt, content
              FROM articles WHERE feed_id = ?1
-             ORDER BY published_at DESC, created_at DESC".to_string(),
+             ORDER BY published_at DESC, created_at DESC"
+                .to_string(),
             Some(id.to_string()),
         ),
         None => (
-            "SELECT id, feed_id, title, url, author, published_at, excerpt, content, summary, translation
+            "SELECT id, feed_id, title, url, author, published_at, excerpt, content
              FROM articles
-             ORDER BY published_at DESC, created_at DESC".to_string(),
+             ORDER BY published_at DESC, created_at DESC"
+                .to_string(),
             None,
         ),
     };
 
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("准备查询失败: {e}"))?;
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("准备查询失败: {e}"))?;
 
     let rows: Vec<Article> = match param {
-        Some(p) => {
+        Some(param) => {
             let mut result = Vec::new();
-            let rows = stmt
-                .query_map(params![p], |row| {
-                    Ok(Article {
-                        id: row.get(0)?,
-                        feed_id: row.get(1)?,
-                        title: row.get(2)?,
-                        url: row.get(3)?,
-                        author: row.get(4)?,
-                        published_at: row.get(5)?,
-                        excerpt: row.get(6)?,
-                        content: row.get(7)?,
-                        summary: row.get(8)?,
-                        translation: row.get(9)?,
-                    })
+            let rows = stmt.query_map(params![p], |row| {
+                Ok(Article {
+                    id: row.get(0)?,
+                    feed_id: row.get(1)?,
+                    title: row.get(2)?,
+                    url: row.get(3)?,
+                    author: row.get(4)?,
+                    published_at: row.get(5)?,
+                    excerpt: row.get(6)?,
+                    content: row.get(7)?,
                 })
-                .map_err(|e| format!("查询失败: {e}"))?;
+            }).map_err(|e| format!("查询失败: {e}"))?;
             for row in rows {
-                result.push(row.map_err(|e| format!("读取行失败: {e}"))?);
+                result.push(row.map_err(|error| format!("Failed to read article row: {error}"))?);
             }
             result
         }
         None => {
             let mut result = Vec::new();
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(Article {
-                        id: row.get(0)?,
-                        feed_id: row.get(1)?,
-                        title: row.get(2)?,
-                        url: row.get(3)?,
-                        author: row.get(4)?,
-                        published_at: row.get(5)?,
-                        excerpt: row.get(6)?,
-                        content: row.get(7)?,
-                        summary: row.get(8)?,
-                        translation: row.get(9)?,
-                    })
+            let rows = stmt.query_map([], |row| {
+                Ok(Article {
+                    id: row.get(0)?,
+                    feed_id: row.get(1)?,
+                    title: row.get(2)?,
+                    url: row.get(3)?,
+                    author: row.get(4)?,
+                    published_at: row.get(5)?,
+                    excerpt: row.get(6)?,
+                    content: row.get(7)?,
                 })
-                .map_err(|e| format!("查询失败: {e}"))?;
+            }).map_err(|e| format!("查询失败: {e}"))?;
             for row in rows {
-                result.push(row.map_err(|e| format!("读取行失败: {e}"))?);
+                result.push(row.map_err(|error| format!("Failed to read article row: {error}"))?);
             }
             result
         }
@@ -411,149 +647,7 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
     Ok(rows)
 }
 
-#[tauri::command]
-fn save_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
-    let conn = open_database(&app)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        params![key, value],
-    )
-    .map_err(|error| format!("Failed to save setting: {error}"))?;
-    Ok(())
-}
-
-#[tauri::command]
-fn load_setting(app: AppHandle, key: String) -> Result<Option<String>, String> {
-    let conn = open_database(&app)?;
-    load_setting_value(&conn, &key)
-}
-
-#[tauri::command]
-fn get_llm_config(app: AppHandle) -> Result<LlmConfig, String> {
-    let conn = open_database(&app)?;
-    get_llm_config_from_db(&conn)
-}
-
-#[tauri::command]
-fn summarize_article(
-    app: AppHandle,
-    article_id: String,
-    force: Option<bool>,
-) -> Result<String, String> {
-    let conn = open_database(&app)?;
-
-    // Return cached summary unless force is true
-    if force != Some(true) {
-        let cached: Option<String> = conn
-            .query_row(
-                "SELECT summary FROM articles WHERE id = ?1",
-                params![article_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-
-        if let Some(ref s) = cached {
-            if !s.is_empty() {
-                return Ok(s.clone());
-            }
-        }
-    }
-
-    let content: String = conn
-        .query_row(
-            "SELECT content FROM articles WHERE id = ?1",
-            params![article_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Article not found: {e}"))?;
-
-    let config = get_llm_config_from_db(&conn)?;
-    let prompt = format!(
-        "Please provide a concise summary of the following article in 2-3 sentences:\n\n{}",
-        content
-    );
-    let summary = llm_provider::call_llm(
-        &config,
-        "You are a helpful assistant that summarizes articles concisely.",
-        &prompt,
-    )?;
-
-    conn.execute(
-        "UPDATE articles SET summary = ?1 WHERE id = ?2",
-        params![summary, article_id],
-    )
-    .map_err(|e| format!("Failed to save summary: {e}"))?;
-
-    Ok(summary)
-}
-
-#[tauri::command]
-fn translate_article(
-    app: AppHandle,
-    article_id: String,
-    target_lang: String,
-) -> Result<String, String> {
-    let conn = open_database(&app)?;
-
-    // Return cached translation
-    let cached: Option<String> = conn
-        .query_row(
-            "SELECT translation FROM articles WHERE id = ?1",
-            params![article_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-
-    if let Some(ref s) = cached {
-        if !s.is_empty() {
-            return Ok(s.clone());
-        }
-    }
-
-    let content: String = conn
-        .query_row(
-            "SELECT content FROM articles WHERE id = ?1",
-            params![article_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Article not found: {e}"))?;
-
-    let config = get_llm_config_from_db(&conn)?;
-
-    let lang_name = match target_lang.as_str() {
-        "zh" => "Chinese",
-        "en" => "English",
-        "ja" => "Japanese",
-        "ko" => "Korean",
-        "fr" => "French",
-        "de" => "German",
-        "es" => "Spanish",
-        _ => &target_lang,
-    };
-
-    let prompt = format!(
-        "Please translate the following article into {}. Preserve the original meaning and tone:\n\n{}",
-        lang_name, content
-    );
-    let translation = llm_provider::call_llm(
-        &config,
-        &format!(
-            "You are a professional translator. Translate the user's text into {}.",
-            lang_name
-        ),
-        &prompt,
-    )?;
-
-    conn.execute(
-        "UPDATE articles SET translation = ?1 WHERE id = ?2",
-        params![translation, article_id],
-    )
-    .map_err(|e| format!("Failed to save translation: {e}"))?;
-
-    Ok(translation)
-}
+// mod opml;  // TODO: 取消注释 when Person C submits opml.rs
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -565,12 +659,7 @@ pub fn run() {
             list_articles,
             add_feed,
             refresh_feed,
-            crate::opml::import_opml,
-            save_setting,
-            load_setting,
-            get_llm_config,
-            summarize_article,
-            translate_article,
+            // crate::opml::import_opml,  // TODO: 取消注释 when Person C submits opml.rs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
