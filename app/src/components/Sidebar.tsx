@@ -1,6 +1,6 @@
 import { useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Feed } from "../types";
+import type { Article, Feed } from "../types";
 
 type Props = {
   feeds: Feed[];
@@ -46,12 +46,12 @@ export function Sidebar({
   async function handleRefreshFeed(feedId: string, event: MouseEvent) {
     event.stopPropagation();
     try {
-      await invoke("refresh_feed", { feedId });
+      const result = await invoke<Article[]>("refresh_feed", { feedId });
       onFeedsChange();
     } catch (error) {
       console.error("刷新失败", error);
     }
-  }
+  }, [refreshToast]);
 
   async function handleImportOpml() {
     if (isImporting) return;
@@ -178,7 +178,11 @@ export function Sidebar({
               <span className="feed-right">
                 {feed.id !== "all" && (
                   <button
-                    className="refresh-button"
+                    className={
+                      refreshingFeedId === feed.id
+                        ? "refresh-button refreshing"
+                        : "refresh-button"
+                    }
                     title="刷新"
                     onClick={(event) => handleRefreshFeed(feed.id, event)}
                   >
@@ -190,6 +194,15 @@ export function Sidebar({
             </div>
           ))}
         </div>
+        {refreshToast && (
+          <div
+            className={`refresh-toast${
+              refreshToast.type === "error" ? " failed" : ""
+            }`}
+          >
+            {refreshToast.message}
+          </div>
+        )}
       </section>
 
       {showAddDialog && (
