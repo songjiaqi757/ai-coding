@@ -403,6 +403,48 @@ button {
   opacity: 1;
 }
 
+/* Refreshing state — spin animation + always visible */
+.refresh-button.refreshing {
+  opacity: 1;
+  color: #1f6feb;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Refresh toast */
+.refresh-toast {
+  margin: 8px 12px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #f1f6ff;
+  color: #1f6feb;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: center;
+  animation: toast-in 0.25s ease-out;
+}
+
+.refresh-toast.failed {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* ═══════════════════════════════════════════════
    Phase 2: 添加 Feed 对话框
    ═══════════════════════════════════════════════ */

@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Feed } from "../types";
+import type { Article, Feed } from "../types";
 
 type Props = {
   feeds: Feed[];
@@ -19,6 +19,11 @@ export function Sidebar({
   const [addUrl, setAddUrl] = useState("");
   const [isAdding, setIsAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [refreshingFeedId, setRefreshingFeedId] = useState<string | null>(null);
+  const [refreshToast, setRefreshToast] = useState<{
+    message: string;
+    type: "success" | "info" | "error";
+  } | null>(null);
 
   async function handleAddFeed() {
     if (!addUrl.trim()) return;
@@ -48,13 +53,38 @@ export function Sidebar({
     e: React.MouseEvent,
   ) {
     e.stopPropagation();
+    setRefreshingFeedId(feedId);
+    setRefreshToast({ message: "正在刷新...", type: "info" });
     try {
-      await invoke("refresh_feed", { feedId });
+      const result = await invoke<Article[]>("refresh_feed", { feedId });
       onFeedsChange();
-    } catch {
-      /* Pure frontend dev — ignored */
+      if (Array.isArray(result) && result.length > 0) {
+        setRefreshToast({
+          message: `刷新完毕，共 ${result.length} 篇文章`,
+          type: "success",
+        });
+      } else {
+        setRefreshToast({ message: "无更新内容", type: "info" });
+      }
+    } catch (err) {
+      /* Tauri invoke real error vs pure-frontend mock */
+      if (typeof err === "string" || err instanceof Error) {
+        setRefreshToast({ message: "刷新失败", type: "error" });
+      } else {
+        setRefreshToast({ message: "刷新完毕（模拟）", type: "info" });
+      }
+    } finally {
+      setRefreshingFeedId(null);
     }
   }
+
+  /* Auto-hide refresh toast */
+  useEffect(() => {
+    if (refreshToast) {
+      const timer = setTimeout(() => setRefreshToast(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [refreshToast]);
 
   async function handleImportOpml() {
     try {
@@ -128,9 +158,14 @@ export function Sidebar({
               <span className="feed-right">
                 {feed.id !== "all" && (
                   <button
-                    className="refresh-button"
+                    className={
+                      refreshingFeedId === feed.id
+                        ? "refresh-button refreshing"
+                        : "refresh-button"
+                    }
                     title="刷新"
                     onClick={(e) => handleRefreshFeed(feed.id, e)}
+                    disabled={refreshingFeedId === feed.id}
                   >
                     &#8635;
                   </button>
@@ -140,6 +175,15 @@ export function Sidebar({
             </div>
           ))}
         </div>
+        {refreshToast && (
+          <div
+            className={`refresh-toast${
+              refreshToast.type === "error" ? " failed" : ""
+            }`}
+          >
+            {refreshToast.message}
+          </div>
+        )}
       </section>
 
       {showAddDialog && (
