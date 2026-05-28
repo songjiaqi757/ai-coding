@@ -65,7 +65,6 @@ OPML 导入只会访问 OPML 文件中由用户提供的 Feed URL。导入结果
 ## 手动验收步骤
 
 1. 运行 `cd app/src-tauri && cargo check`，确认 Rust 后端编译通过。
-<<<<<<< HEAD
 2. 启动应用后，点击添加订阅源，输入一个真实 RSS / Atom / JSON Feed URL。
 3. 再次添加同一个 URL，确认 Feed 列表不会重复创建订阅源，文章仍归属原订阅源。
 4. 通过前端 OPML 导入口选择 `samples/opml/example.opml` 或本地 `feed.opml`。
@@ -76,10 +75,4 @@ OPML 导入只会访问 OPML 文件中由用户提供的 Feed URL。导入结果
 9. 点击单个 Feed 的刷新按钮，确认新增文章会同步到本地数据库。
 10. 点击 OPML 导出入口，保存为 `.opml` 文件。
 11. 用文本编辑器打开导出的文件，确认其中包含 XML 声明，以及本地订阅源的 `outline`、`type`、`xmlUrl`、`htmlUrl` 和 `title`。
-=======
-2. 启动应用后，通过前端 OPML 导入入口选择 `samples/opml/example.opml`。
-3. 确认导入后 Feed 列表出现多个订阅源。
-4. 选择导入的 Feed，确认文章列表和阅读区能显示对应内容。
-5. 再次导入同一个 OPML，确认不会重复创建相同 URL 的订阅源。
-
->>>>>>> 2ef95399824ea16cd6c12648ffa15fe21d04b941
+12. 再次导入同一个 OPML，确认不会重复创建相同 URL 的订阅源。
