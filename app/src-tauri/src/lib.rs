@@ -1,4 +1,5 @@
 use reqwest::Client;
+use reqwest::Url;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -61,6 +62,7 @@ const DEMO_ARTICLES: &[(&str, &str, &str, &str, &str, &str, &str, Option<&str>)]
     ),
 ];
 const CLEANER_VERSION: &str = "node-readability-v4";
+const SAVED_ARTICLES_FEED_ID: &str = "saved";
 
 #[derive(Debug, Serialize, Clone)]
 struct Feed {
@@ -329,6 +331,20 @@ fn seed_database(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_saved_articles_feed(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "
+        INSERT INTO feeds (id, title, unread, url, site_url)
+        VALUES (?1, 'Saved Articles', 0, NULL, NULL)
+        ON CONFLICT(id) DO NOTHING
+        ",
+        [SAVED_ARTICLES_FEED_ID],
+    )
+    .map_err(|error| format!("Failed to ensure Saved Articles feed: {error}"))?;
+
+    Ok(())
+}
+
 fn map_feed_row(row: &Row<'_>) -> rusqlite::Result<Feed> {
     Ok(Feed {
         id: row.get(0)?,
@@ -391,6 +407,24 @@ fn load_article_by_id(conn: &Connection, article_id: &str) -> Result<Article, St
 fn safe_fetchable_url(url: &str) -> bool {
     let normalized = url.trim().to_ascii_lowercase();
     normalized.starts_with("http://") || normalized.starts_with("https://")
+}
+
+fn normalize_fetch_url(url: &str) -> Result<String, String> {
+    let trimmed = url.trim();
+    if !safe_fetchable_url(trimmed) {
+        return Err("Article URL must start with http:// or https://".to_string());
+    }
+
+    Url::parse(trimmed)
+        .map(|parsed| parsed.to_string())
+        .map_err(|error| format!("Invalid article URL: {error}"))
+}
+
+fn source_from_url(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .unwrap_or_else(|| "Web Article".to_string())
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
@@ -550,6 +584,77 @@ fn update_article_cleaning(
     Ok(())
 }
 
+fn insert_cleaned_article(
+    conn: &Connection,
+    url: &str,
+    raw_html: &str,
+    cleaned_html: &str,
+    cleaned_markdown: &str,
+    title: &str,
+    author: Option<&str>,
+    excerpt: Option<&str>,
+) -> Result<String, String> {
+    ensure_saved_articles_feed(conn)?;
+
+    let article_id = format!(
+        "web-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("Failed to generate article id: {error}"))?
+            .as_millis()
+    );
+    let source = source_from_url(url);
+    let content = excerpt.unwrap_or("Cleaned web article");
+
+    conn.execute(
+        "
+        INSERT INTO articles (
+            id,
+            feed_id,
+            title,
+            source,
+            published_at,
+            excerpt,
+            content,
+            url,
+            author,
+            raw_html,
+            cleaned_html,
+            cleaned_markdown,
+            cleaner_version
+        )
+        VALUES (?1, ?2, ?3, ?4, 'Fetched article', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ",
+        params![
+            article_id,
+            SAVED_ARTICLES_FEED_ID,
+            title,
+            source,
+            excerpt.unwrap_or(""),
+            content,
+            url,
+            author,
+            raw_html,
+            cleaned_html,
+            cleaned_markdown,
+            CLEANER_VERSION
+        ],
+    )
+    .map_err(|error| format!("Failed to save fetched article: {error}"))?;
+
+    conn.execute(
+        "
+        UPDATE feeds
+        SET unread = unread + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?1
+        ",
+        [SAVED_ARTICLES_FEED_ID],
+    )
+    .map_err(|error| format!("Failed to update Saved Articles feed: {error}"))?;
+
+    Ok(article_id)
+}
+
 #[tauri::command]
 fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
     let conn = open_database(&app)?;
@@ -650,7 +755,9 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
         .filter(|value| !value.trim().is_empty())
         .cloned();
 
-    let (html_for_cleaning, raw_html_to_store) = if let Some(existing_raw_html) = raw_html_source {
+    let (html_for_cleaning, raw_html_to_store) = if let Some(existing_raw_html) =
+        raw_html_source
+    {
         (existing_raw_html.clone(), Some(existing_raw_html))
     } else if let Some(existing_cleaned_html) = cached_cleaned_html.clone() {
         (existing_cleaned_html, None)
@@ -676,11 +783,13 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
         .ok_or_else(|| "Article cleaner returned empty cleaned_html".to_string())?;
     let cleaned_markdown = normalize_optional_text(cleaned.cleaned_markdown)
         .ok_or_else(|| "Article cleaner returned empty cleaned_markdown".to_string())?;
-    let next_title = normalize_optional_text(cleaned.title).or_else(|| Some(initial_article.title.clone()));
+    let next_title =
+        normalize_optional_text(cleaned.title).or_else(|| Some(initial_article.title.clone()));
     let next_author = normalize_optional_text(cleaned.byline)
         .or_else(|| initial_article.author.clone())
         .or_else(|| initial_article.source.clone());
-    let next_excerpt = normalize_optional_text(cleaned.excerpt).or_else(|| initial_article.excerpt.clone());
+    let next_excerpt =
+        normalize_optional_text(cleaned.excerpt).or_else(|| initial_article.excerpt.clone());
 
     let conn = open_database(&app)?;
     update_article_cleaning(
@@ -692,6 +801,34 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
         next_title.as_deref(),
         next_author.as_deref(),
         next_excerpt.as_deref(),
+    )?;
+
+    load_article_by_id(&conn, &article_id)
+}
+
+#[tauri::command]
+async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article, String> {
+    let normalized_url = normalize_fetch_url(&url)?;
+    let raw_html = fetch_html(&normalized_url).await?;
+    let cleaned = run_node_cleaner(raw_html.clone(), Some(normalized_url.clone())).await?;
+    let cleaned_html = normalize_optional_text(cleaned.cleaned_html)
+        .ok_or_else(|| "Article cleaner returned empty cleaned_html".to_string())?;
+    let cleaned_markdown = normalize_optional_text(cleaned.cleaned_markdown)
+        .ok_or_else(|| "Article cleaner returned empty cleaned_markdown".to_string())?;
+    let title = normalize_optional_text(cleaned.title).unwrap_or_else(|| normalized_url.clone());
+    let author = normalize_optional_text(cleaned.byline);
+    let excerpt = normalize_optional_text(cleaned.excerpt);
+
+    let conn = open_database(&app)?;
+    let article_id = insert_cleaned_article(
+        &conn,
+        &normalized_url,
+        &raw_html,
+        &cleaned_html,
+        &cleaned_markdown,
+        &title,
+        author.as_deref(),
+        excerpt.as_deref(),
     )?;
 
     load_article_by_id(&conn, &article_id)
@@ -781,6 +918,7 @@ pub fn run() {
             add_feed,
             refresh_feed,
             clean_article,
+            fetch_and_clean_article,
             summarize_article,
             translate_article
         ])

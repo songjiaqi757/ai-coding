@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MarkdownIt from "markdown-it";
 import "./App.css";
@@ -31,6 +31,10 @@ type Article = {
 
 type ReaderState = "empty" | "loading" | "error" | "success";
 
+function hasTauriBackend() {
+  return "__TAURI_INTERNALS__" in window;
+}
+
 function App() {
   const [feeds, setFeeds] = useState<Feed[]>([]);
   const [articles, setArticles] = useState<Article[]>([]);
@@ -43,8 +47,18 @@ function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [readerState, setReaderState] = useState<ReaderState>("empty");
   const [readerError, setReaderError] = useState<string | null>(null);
+  const [articleUrl, setArticleUrl] = useState("");
+  const [isFetchingArticle, setIsFetchingArticle] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   async function loadLocalData() {
+    if (!hasTauriBackend()) {
+      setIsLoading(false);
+      setErrorMessage("Desktop backend is unavailable. Start the app with pnpm tauri dev to load local articles.");
+      setReaderState("empty");
+      return;
+    }
+
     try {
       setIsLoading(true);
       setErrorMessage(null);
@@ -90,6 +104,12 @@ function App() {
   }
 
   async function handleCleanArticle(articleId: string) {
+    if (!hasTauriBackend()) {
+      setReaderError("Desktop backend is unavailable. Start the app with pnpm tauri dev to clean articles.");
+      setReaderState("error");
+      return;
+    }
+
     try {
       setReaderState("loading");
       setReaderError(null);
@@ -102,6 +122,52 @@ function App() {
     } catch (error) {
       setReaderError(error instanceof Error ? error.message : String(error));
       setReaderState("error");
+    }
+  }
+
+  async function handleFetchArticle(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!hasTauriBackend()) {
+      const message = "Desktop backend is unavailable. Start the app with pnpm tauri dev to fetch and clean article URLs.";
+      setFetchError(message);
+      setReaderError(message);
+      setReaderState("empty");
+      return;
+    }
+
+    const url = articleUrl.trim();
+    if (!url) {
+      setFetchError("Please enter an article URL.");
+      return;
+    }
+
+    try {
+      setIsFetchingArticle(true);
+      setFetchError(null);
+      setReaderState("loading");
+      setReaderError(null);
+
+      const article = await invoke<Article>("fetch_and_clean_article", { url });
+      const [nextFeeds, nextArticles] = await Promise.all([
+        invoke<Feed[]>("list_feeds"),
+        invoke<Article[]>("list_articles"),
+      ]);
+
+      setFeeds(nextFeeds);
+      setArticles(nextArticles);
+      setSelectedFeedId("all");
+      setSelectedArticleId(article.id);
+      setSelectedArticleDetail(article);
+      setReaderState("success");
+      setArticleUrl("");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setFetchError(message);
+      setReaderError(message);
+      setReaderState(selectedArticleId ? "error" : "empty");
+    } finally {
+      setIsFetchingArticle(false);
     }
   }
 
@@ -302,9 +368,26 @@ function App() {
           </button>
         </div>
 
-        <div className="search-box">
-          <input placeholder="Search articles..." />
-        </div>
+        <form
+          className="url-fetcher"
+          onSubmit={(event) => void handleFetchArticle(event)}
+        >
+          <input
+            value={articleUrl}
+            onChange={(event) => setArticleUrl(event.target.value)}
+            placeholder="https://example.com/article"
+            disabled={isFetchingArticle}
+          />
+          <button
+            className="primary-button"
+            type="submit"
+            disabled={isFetchingArticle}
+          >
+            {isFetchingArticle ? "Fetching..." : "Fetch"}
+          </button>
+        </form>
+
+        {fetchError && <div className="error-box">{fetchError}</div>}
 
         {errorMessage && <div className="error-box">{errorMessage}</div>}
 
