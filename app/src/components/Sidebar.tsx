@@ -22,6 +22,11 @@ export function Sidebar({
   const [isImporting, setIsImporting] = useState(false);
   const [opmlStatus, setOpmlStatus] = useState<string | null>(null);
   const [opmlError, setOpmlError] = useState<string | null>(null);
+  const [refreshingFeedId, setRefreshingFeedId] = useState<string | null>(null);
+  const [refreshToast, setRefreshToast] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
 
   async function handleAddFeed() {
     if (!addUrl.trim()) return;
@@ -45,13 +50,22 @@ export function Sidebar({
 
   async function handleRefreshFeed(feedId: string, event: MouseEvent) {
     event.stopPropagation();
+    setRefreshingFeedId(feedId);
+
     try {
-      const result = await invoke<Article[]>("refresh_feed", { feedId });
+      await invoke<Article[]>("refresh_feed", { feedId });
       onFeedsChange();
+      setRefreshToast({ type: "success", message: "刷新成功" });
     } catch (error) {
       console.error("刷新失败", error);
+      setRefreshToast({ type: "error", message: "刷新失败" });
+    } finally {
+      setRefreshingFeedId(null);
+      setTimeout(() => {
+        setRefreshToast(null);
+      }, 3000);
     }
-  }, [refreshToast]);
+  }
 
   async function handleImportOpml() {
     if (isImporting) return;
