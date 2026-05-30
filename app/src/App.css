@@ -897,3 +897,124 @@ input:disabled {
 .preview-error span {
   flex: 1;
 }
+
+/* Feed management controls from main */
+.section-header,
+.feed-right,
+.dialog-actions {
+  display: flex;
+  align-items: center;
+}
+
+.section-header {
+  justify-content: space-between;
+}
+
+.section-actions,
+.feed-right,
+.dialog-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.icon-button,
+.refresh-button {
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #64748b;
+}
+
+.icon-button {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.icon-button:hover,
+.refresh-button:hover {
+  background: #e2e8f0;
+}
+
+.feed-title {
+  overflow: hidden;
+  color: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refresh-button {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  opacity: 0;
+}
+
+.feed-item:hover .refresh-button,
+.refresh-button.refreshing {
+  opacity: 1;
+}
+
+.refresh-button.refreshing {
+  color: #1f6feb;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.opml-status,
+.refresh-toast {
+  padding: 8px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  color: #1e3a8a;
+  background: #eff6ff;
+  font-size: 12px;
+}
+
+.opml-status.error,
+.refresh-toast.failed {
+  border-color: #fecaca;
+  color: #991b1b;
+  background: #fef2f2;
+}
+
+.dialog-overlay {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 30%);
+}
+
+.dialog {
+  width: min(420px, calc(100vw - 48px));
+  padding: 28px;
+  border-radius: 20px;
+  background: white;
+  box-shadow: 0 24px 64px rgb(0 0 0 / 18%);
+}
+
+.dialog input {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #d0d7e2;
+  border-radius: 12px;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.error-text {
+  color: #dc2626;
+  font-size: 13px;
+}

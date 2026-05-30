@@ -9,15 +9,16 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MarkdownIt from "markdown-it";
+import { Sidebar } from "./components/Sidebar";
 import "./App.css";
 
 type Feed = {
   id: string;
   title: string;
-  url?: string | null;
-  site_url?: string | null;
-  last_sync_at?: string | null;
-  unread?: number;
+  url: string;
+  siteUrl: string | null;
+  lastSyncAt: string | null;
+  unread: number;
 };
 
 type Article = {
@@ -564,19 +565,6 @@ function App() {
     if (selectedArticleId) void loadArticleDetail(selectedArticleId);
   }, [selectedArticleId]);
 
-  const allFeed = useMemo(
-    () => ({ id: "all", title: "All Feeds", unread: feeds.reduce((sum, feed) => sum + (feed.unread ?? 0), 0) }),
-    [feeds],
-  );
-  const visibleFeeds = useMemo(
-    () => [
-      allFeed,
-      { id: SMART_FAVORITES, title: "Favorites", unread: articles.filter((item) => item.is_favorite).length },
-      { id: SMART_READ_LATER, title: "Read Later", unread: articles.filter((item) => item.read_later).length },
-      ...feeds,
-    ],
-    [allFeed, articles, feeds],
-  );
   const visibleArticles = useMemo(() => {
     const source = searchResults ?? articles;
     if (selectedFeedId === SMART_FAVORITES) return source.filter((item) => item.is_favorite);
@@ -794,19 +782,14 @@ function App() {
 
   return (
     <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand"><div className="brand-mark">M</div><div><h1>Mercury</h1><p>AI Reader</p></div></div>
-        <section className="panel-section">
-          <div className="section-title">Feeds</div>
-          <div className="feed-list">
-            {visibleFeeds.map((feed) => (
-              <button key={feed.id} className={feed.id === selectedFeedId ? "feed-item active" : "feed-item"} onClick={() => setSelectedFeedId(feed.id)}>
-                <span>{feed.title}</span><span className="badge">{feed.unread ?? 0}</span>
-              </button>
-            ))}
-          </div>
-        </section>
-      </aside>
+      <Sidebar
+        feeds={feeds}
+        selectedFeedId={selectedFeedId}
+        favoriteCount={articles.filter((article) => article.is_favorite).length}
+        readLaterCount={articles.filter((article) => article.read_later).length}
+        onSelectFeed={setSelectedFeedId}
+        onFeedsChange={loadLocalData}
+      />
 
       <section className="article-list">
         <div className="toolbar"><div><h2>Articles</h2><p>{isLoading ? "Loading local data..." : `${visibleArticles.length} local items`}</p></div><button className="primary-button" onClick={() => void loadLocalData()}>Refresh</button></div>
