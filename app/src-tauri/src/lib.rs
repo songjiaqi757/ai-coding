@@ -27,7 +27,6 @@ pub struct Feed {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Article {
     pub id: String,
     pub feed_id: String,
@@ -46,6 +45,23 @@ pub struct Article {
     pub final_url: Option<String>,
     pub summary: Option<String>,
     pub translation: Option<String>,
+    pub is_favorite: bool,
+    pub read_later: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct Annotation {
+    id: String,
+    article_id: String,
+    kind: String,
+    selected_text: Option<String>,
+    prefix_text: Option<String>,
+    suffix_text: Option<String>,
+    start_offset: Option<i64>,
+    end_offset: Option<i64>,
+    note_text: Option<String>,
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +138,8 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             read_status          INTEGER NOT NULL DEFAULT 0,
             summary              TEXT,
             translation          TEXT,
+            is_favorite          INTEGER NOT NULL DEFAULT 0,
+            read_later           INTEGER NOT NULL DEFAULT 0,
             created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(feed_id) REFERENCES feeds(id),
@@ -131,6 +149,21 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS annotations (
+            id TEXT PRIMARY KEY,
+            article_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('highlight', 'note')),
+            selected_text TEXT,
+            prefix_text TEXT,
+            suffix_text TEXT,
+            start_offset INTEGER,
+            end_offset INTEGER,
+            note_text TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE
         );
         ",
     )
@@ -155,6 +188,8 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE articles ADD COLUMN final_url TEXT",
         "ALTER TABLE articles ADD COLUMN summary TEXT",
         "ALTER TABLE articles ADD COLUMN translation TEXT",
+        "ALTER TABLE articles ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE articles ADD COLUMN read_later INTEGER NOT NULL DEFAULT 0",
     ];
 
     for sql in &migrations {
@@ -480,6 +515,8 @@ fn article_from_row(row: &Row<'_>) -> rusqlite::Result<Article> {
         final_url: row.get(14)?,
         summary: row.get(15)?,
         translation: row.get(16)?,
+        is_favorite: row.get(17)?,
+        read_later: row.get(18)?,
     })
 }
 
@@ -623,7 +660,8 @@ fn load_article_by_id(conn: &Connection, article_id: &str) -> Result<Article, St
     conn.query_row(
         "SELECT id, feed_id, title, url, author, published_at, excerpt, content,
                 raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                content_fetch_status, content_fetch_error, final_url, summary, translation
+                  content_fetch_status, content_fetch_error, final_url, summary, translation,
+                  is_favorite, read_later
          FROM articles
          WHERE id = ?1",
         params![article_id],
@@ -780,7 +818,8 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
         Some(_) => {
             "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
                     raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                    content_fetch_status, content_fetch_error, final_url, summary, translation
+                     content_fetch_status, content_fetch_error, final_url, summary, translation,
+                     is_favorite, read_later
              FROM articles
              WHERE feed_id = ?1
              ORDER BY published_at DESC, created_at DESC"
@@ -788,7 +827,8 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
         None => {
             "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
                     raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                    content_fetch_status, content_fetch_error, final_url, summary, translation
+                     content_fetch_status, content_fetch_error, final_url, summary, translation,
+                     is_favorite, read_later
              FROM articles
              ORDER BY published_at DESC, created_at DESC"
         }
@@ -825,6 +865,217 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
 fn get_article(app: AppHandle, article_id: String) -> Result<Article, String> {
     let conn = open_database(&app)?;
     load_article_by_id(&conn, &article_id)
+}
+
+fn annotation_from_row(row: &Row<'_>) -> rusqlite::Result<Annotation> {
+    Ok(Annotation {
+        id: row.get(0)?,
+        article_id: row.get(1)?,
+        kind: row.get(2)?,
+        selected_text: row.get(3)?,
+        prefix_text: row.get(4)?,
+        suffix_text: row.get(5)?,
+        start_offset: row.get(6)?,
+        end_offset: row.get(7)?,
+        note_text: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+fn load_annotation_by_id(conn: &Connection, annotation_id: &str) -> Result<Annotation, String> {
+    conn.query_row(
+        "SELECT id, article_id, kind, selected_text, prefix_text, suffix_text,
+                start_offset, end_offset, note_text, created_at, updated_at
+         FROM annotations
+         WHERE id = ?1",
+        [annotation_id],
+        annotation_from_row,
+    )
+    .optional()
+    .map_err(|error| format!("Failed to query annotation: {error}"))?
+    .ok_or_else(|| format!("Annotation {annotation_id} was not found"))
+}
+
+#[tauri::command]
+fn set_article_favorite(
+    app: AppHandle,
+    article_id: String,
+    is_favorite: bool,
+) -> Result<Article, String> {
+    let conn = open_database(&app)?;
+    let changed = conn
+        .execute(
+            "UPDATE articles SET is_favorite = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![article_id, is_favorite],
+        )
+        .map_err(|error| format!("Failed to update favorite state: {error}"))?;
+    if changed == 0 {
+        return Err(format!("Article {article_id} was not found"));
+    }
+    load_article_by_id(&conn, &article_id)
+}
+
+#[tauri::command]
+fn set_article_read_later(
+    app: AppHandle,
+    article_id: String,
+    read_later: bool,
+) -> Result<Article, String> {
+    let conn = open_database(&app)?;
+    let changed = conn
+        .execute(
+            "UPDATE articles SET read_later = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![article_id, read_later],
+        )
+        .map_err(|error| format!("Failed to update read later state: {error}"))?;
+    if changed == 0 {
+        return Err(format!("Article {article_id} was not found"));
+    }
+    load_article_by_id(&conn, &article_id)
+}
+
+#[tauri::command]
+fn list_annotations(app: AppHandle, article_id: String) -> Result<Vec<Annotation>, String> {
+    let conn = open_database(&app)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, article_id, kind, selected_text, prefix_text, suffix_text,
+                    start_offset, end_offset, note_text, created_at, updated_at
+             FROM annotations
+             WHERE article_id = ?1
+             ORDER BY created_at ASC",
+        )
+        .map_err(|error| format!("Failed to prepare annotations query: {error}"))?;
+    let rows = stmt
+        .query_map([article_id], annotation_from_row)
+        .map_err(|error| format!("Failed to query annotations: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Failed to read annotation row: {error}"))
+}
+
+#[tauri::command]
+fn create_annotation(
+    app: AppHandle,
+    article_id: String,
+    kind: String,
+    selected_text: Option<String>,
+    prefix_text: Option<String>,
+    suffix_text: Option<String>,
+    start_offset: Option<i64>,
+    end_offset: Option<i64>,
+    note_text: Option<String>,
+) -> Result<Annotation, String> {
+    if kind != "highlight" && kind != "note" {
+        return Err("Annotation kind must be highlight or note".to_string());
+    }
+    if kind == "highlight" && selected_text.as_ref().is_none_or(|value| value.trim().is_empty()) {
+        return Err("Highlight selected text cannot be empty".to_string());
+    }
+    if kind == "note" && note_text.as_ref().is_none_or(|value| value.trim().is_empty()) {
+        return Err("Note text cannot be empty".to_string());
+    }
+
+    let conn = open_database(&app)?;
+    load_article_by_id(&conn, &article_id)?;
+    let annotation_id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO annotations (
+            id, article_id, kind, selected_text, prefix_text, suffix_text,
+            start_offset, end_offset, note_text
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            annotation_id,
+            article_id,
+            kind,
+            normalize_optional_text(selected_text),
+            normalize_optional_text(prefix_text),
+            normalize_optional_text(suffix_text),
+            start_offset,
+            end_offset,
+            normalize_optional_text(note_text)
+        ],
+    )
+    .map_err(|error| format!("Failed to create annotation: {error}"))?;
+    load_annotation_by_id(&conn, &annotation_id)
+}
+
+#[tauri::command]
+fn update_annotation(
+    app: AppHandle,
+    annotation_id: String,
+    note_text: Option<String>,
+) -> Result<Annotation, String> {
+    let conn = open_database(&app)?;
+    let changed = conn
+        .execute(
+            "UPDATE annotations SET note_text = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![annotation_id, normalize_optional_text(note_text)],
+        )
+        .map_err(|error| format!("Failed to update annotation: {error}"))?;
+    if changed == 0 {
+        return Err(format!("Annotation {annotation_id} was not found"));
+    }
+    load_annotation_by_id(&conn, &annotation_id)
+}
+
+#[tauri::command]
+fn delete_annotation(app: AppHandle, annotation_id: String) -> Result<(), String> {
+    let conn = open_database(&app)?;
+    let changed = conn
+        .execute("DELETE FROM annotations WHERE id = ?1", [annotation_id.clone()])
+        .map_err(|error| format!("Failed to delete annotation: {error}"))?;
+    if changed == 0 {
+        return Err(format!("Annotation {annotation_id} was not found"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn search_articles(
+    app: AppHandle,
+    query: String,
+    feed_id: Option<String>,
+) -> Result<Vec<Article>, String> {
+    let conn = open_database(&app)?;
+    let trimmed_query = query.trim();
+    if trimmed_query.is_empty() {
+        return list_articles_by_feed(&conn, feed_id.as_deref());
+    }
+
+    let pattern = format!("%{trimmed_query}%");
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
+                    raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                    content_fetch_status, content_fetch_error, final_url, summary, translation,
+                    is_favorite, read_later
+             FROM articles
+             WHERE (?1 IS NULL OR ?1 = '' OR feed_id = ?1)
+               AND (
+                 title LIKE ?2 COLLATE NOCASE
+                 OR COALESCE(author, '') LIKE ?2 COLLATE NOCASE
+                 OR COALESCE(excerpt, '') LIKE ?2 COLLATE NOCASE
+                 OR COALESCE(content, '') LIKE ?2 COLLATE NOCASE
+                 OR COALESCE(cleaned_html, '') LIKE ?2 COLLATE NOCASE
+                 OR COALESCE(cleaned_markdown, '') LIKE ?2 COLLATE NOCASE
+                 OR EXISTS (
+                     SELECT 1 FROM annotations
+                     WHERE annotations.article_id = articles.id
+                       AND (
+                         COALESCE(annotations.selected_text, '') LIKE ?2 COLLATE NOCASE
+                         OR COALESCE(annotations.note_text, '') LIKE ?2 COLLATE NOCASE
+                       )
+                 )
+               )
+             ORDER BY published_at DESC, created_at DESC",
+        )
+        .map_err(|error| format!("Failed to prepare article search: {error}"))?;
+    let rows = stmt
+        .query_map(params![feed_id.as_deref(), pattern], article_from_row)
+        .map_err(|error| format!("Failed to search articles: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Failed to read search result: {error}"))
 }
 
 #[tauri::command]
@@ -1029,6 +1280,13 @@ pub fn run() {
             list_feeds,
             list_articles,
             get_article,
+            set_article_favorite,
+            set_article_read_later,
+            list_annotations,
+            create_annotation,
+            update_annotation,
+            delete_annotation,
+            search_articles,
             add_feed,
             refresh_feed,
             clean_article,

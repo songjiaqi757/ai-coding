@@ -23,4 +23,8 @@ export type Article = {
   contentFetchStatus: string;
   contentFetchError: string | null;
   finalUrl: string | null;
+  summary: string | null;
+  translation: string | null;
+  isFavorite: boolean;
+  readLater: boolean;
 };

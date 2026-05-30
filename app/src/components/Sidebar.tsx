@@ -5,6 +5,8 @@ import type { Article, Feed } from "../types";
 type Props = {
   feeds: Feed[];
   selectedFeedId: string;
+  favoriteCount: number;
+  readLaterCount: number;
   onSelectFeed: (id: string) => void;
   onFeedsChange: () => void;
 };
@@ -12,6 +14,8 @@ type Props = {
 export function Sidebar({
   feeds,
   selectedFeedId,
+  favoriteCount,
+  readLaterCount,
   onSelectFeed,
   onFeedsChange,
 }: Props) {
@@ -122,6 +126,24 @@ export function Sidebar({
     unread: feeds.reduce((sum, feed) => sum + feed.unread, 0),
     lastSyncAt: null,
   };
+  const smartFeeds: Feed[] = [
+    {
+      id: "favorites",
+      title: "Favorites",
+      url: "",
+      siteUrl: null,
+      unread: favoriteCount,
+      lastSyncAt: null,
+    },
+    {
+      id: "read-later",
+      title: "Read Later",
+      url: "",
+      siteUrl: null,
+      unread: readLaterCount,
+      lastSyncAt: null,
+    },
+  ];
 
   return (
     <aside className="sidebar">
@@ -169,7 +191,7 @@ export function Sidebar({
         )}
 
         <div className="feed-list">
-          {[allFeed, ...feeds].map((feed) => (
+          {[allFeed, ...smartFeeds, ...feeds].map((feed) => (
             <div
               key={feed.id}
               className={
@@ -190,7 +212,7 @@ export function Sidebar({
                 {feed.title}
               </button>
               <span className="feed-right">
-                {feed.id !== "all" && (
+                {!["all", "favorites", "read-later"].includes(feed.id) && (
                   <button
                     className={
                       refreshingFeedId === feed.id
