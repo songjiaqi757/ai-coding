@@ -1,5 +1,6 @@
 mod llm_provider;
 pub mod opml;
+pub mod sync;
 
 use reqwest::{Client, Url};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -12,7 +13,7 @@ use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 const CLEANER_VERSION: &str = "node-readability-v4";
-const SAVED_ARTICLES_FEED_ID: &str = "saved";
+pub(crate) const SAVED_ARTICLES_FEED_ID: &str = "saved";
 const SAVED_ARTICLES_FEED_URL: &str = "mercury://saved-articles";
 
 #[derive(Debug, Serialize)]
@@ -149,6 +150,15 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sync_failures (
+            feed_id TEXT PRIMARY KEY,
+            feed_title TEXT NOT NULL,
+            error TEXT NOT NULL,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            failed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(feed_id) REFERENCES feeds(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS annotations (
@@ -743,34 +753,8 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
         return list_articles_by_feed(&conn, Some(&feed_id));
     }
 
+    sync::sync_one_feed(&app, &feed_id).await?;
     let conn = open_database(&app)?;
-    let feed_url: String = conn
-        .query_row(
-            "SELECT url FROM feeds WHERE id = ?1",
-            params![feed_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| format!("Feed not found: {feed_id}"))?;
-
-    let response = reqwest::get(&feed_url)
-        .await
-        .map_err(|error| format!("Failed to request feed: {error}"))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("Failed to read feed response: {error}"))?;
-    let parsed = feed_rs::parser::parse(bytes.as_ref())
-        .map_err(|error| format!("Failed to parse feed: {error}"))?;
-
-    save_articles(&conn, &feed_id, parsed.entries)?;
-    conn.execute(
-        "UPDATE feeds
-         SET last_sync_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?1",
-        params![feed_id],
-    )
-    .map_err(|error| format!("Failed to update sync time: {error}"))?;
-
     list_articles_by_feed(&conn, Some(&feed_id))
 }
 
@@ -1274,6 +1258,7 @@ async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article,
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(sync::SyncState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -1289,6 +1274,11 @@ pub fn run() {
             search_articles,
             add_feed,
             refresh_feed,
+            sync::start_sync,
+            sync::get_sync_status,
+            sync::retry_failed_syncs,
+            sync::get_sync_config,
+            sync::update_sync_config,
             clean_article,
             fetch_and_clean_article,
             opml::import_opml,
