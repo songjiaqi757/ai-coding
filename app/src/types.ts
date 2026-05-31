@@ -7,6 +7,55 @@ export type Feed = {
   lastSyncAt: string | null;
 };
 
+export type SyncPhase = "idle" | "running" | "success" | "failed";
+export type ReadFilter = "all" | "unread" | "read";
+
+export type SyncFeedFailure = {
+  feedId: string;
+  feedTitle: string;
+  error: string;
+  retryCount: number;
+  failedAt: string;
+};
+
+export type SyncStatus = {
+  phase: SyncPhase;
+  currentFeedId: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  totalFeeds: number;
+  completedFeeds: number;
+  failedFeeds: SyncFeedFailure[];
+  lastError: string | null;
+};
+
+export type SyncConfig = {
+  enabled: boolean;
+  intervalMinutes: number;
+  retryLimit: number;
+  nextSyncAt: string | null;
+};
+
+export type SyncReport = {
+  totalFeeds: number;
+  syncedFeeds: number;
+  failedFeeds: SyncFeedFailure[];
+  newArticles: number;
+  startedAt: string;
+  finishedAt: string;
+};
+
+export type FeedUnread = {
+  feedId: string;
+  feedTitle: string;
+  unread: number;
+};
+
+export type UnreadSummary = {
+  totalUnread: number;
+  feedUnread: FeedUnread[];
+};
+
 export type Article = {
   id: string;
   feedId: string;
@@ -25,6 +74,7 @@ export type Article = {
   finalUrl: string | null;
   summary: string | null;
   translation: string | null;
+  isRead: boolean;
   isFavorite: boolean;
   readLater: boolean;
 };

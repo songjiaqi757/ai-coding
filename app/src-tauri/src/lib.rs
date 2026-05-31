@@ -2,6 +2,7 @@ mod llm_provider;
 pub mod opml;
 pub mod sync;
 
+use llm_provider::LlmConfig;
 use reqwest::{Client, Url};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ pub struct Feed {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Article {
     pub id: String,
     pub feed_id: String,
@@ -46,8 +48,24 @@ pub struct Article {
     pub final_url: Option<String>,
     pub summary: Option<String>,
     pub translation: Option<String>,
+    pub is_read: bool,
     pub is_favorite: bool,
     pub read_later: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedUnread {
+    pub feed_id: String,
+    pub feed_title: String,
+    pub unread: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreadSummary {
+    pub total_unread: i64,
+    pub feed_unread: Vec<FeedUnread>,
 }
 
 #[derive(Debug, Serialize)]
@@ -507,6 +525,7 @@ fn select_article_url(entry: &feed_rs::model::Entry) -> Option<String> {
 }
 
 fn article_from_row(row: &Row<'_>) -> rusqlite::Result<Article> {
+    let read_status: i64 = row.get(8)?;
     Ok(Article {
         id: row.get(0)?,
         feed_id: row.get(1)?,
@@ -516,17 +535,18 @@ fn article_from_row(row: &Row<'_>) -> rusqlite::Result<Article> {
         published_at: row.get(5)?,
         excerpt: row.get(6)?,
         content: row.get(7)?,
-        raw_html: row.get(8)?,
-        cleaned_html: row.get(9)?,
-        cleaned_markdown: row.get(10)?,
-        content_fetched_at: row.get(11)?,
-        content_fetch_status: row.get(12)?,
-        content_fetch_error: row.get(13)?,
-        final_url: row.get(14)?,
-        summary: row.get(15)?,
-        translation: row.get(16)?,
-        is_favorite: row.get(17)?,
-        read_later: row.get(18)?,
+        is_read: read_status == 1,
+        raw_html: row.get(9)?,
+        cleaned_html: row.get(10)?,
+        cleaned_markdown: row.get(11)?,
+        content_fetched_at: row.get(12)?,
+        content_fetch_status: row.get(13)?,
+        content_fetch_error: row.get(14)?,
+        final_url: row.get(15)?,
+        summary: row.get(16)?,
+        translation: row.get(17)?,
+        is_favorite: row.get(18)?,
+        read_later: row.get(19)?,
     })
 }
 
@@ -669,7 +689,7 @@ async fn fetch_html(url: &str) -> Result<String, String> {
 fn load_article_by_id(conn: &Connection, article_id: &str) -> Result<Article, String> {
     conn.query_row(
         "SELECT id, feed_id, title, url, author, published_at, excerpt, content,
-                raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
                   content_fetch_status, content_fetch_error, final_url, summary, translation,
                   is_favorite, read_later
          FROM articles
@@ -750,12 +770,12 @@ async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
 async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, String> {
     if feed_id == SAVED_ARTICLES_FEED_ID {
         let conn = open_database(&app)?;
-        return list_articles_by_feed(&conn, Some(&feed_id));
+        return list_articles_by_feed(&conn, Some(&feed_id), None);
     }
 
     sync::sync_one_feed(&app, &feed_id).await?;
     let conn = open_database(&app)?;
-    list_articles_by_feed(&conn, Some(&feed_id))
+    list_articles_by_feed(&conn, Some(&feed_id), None)
 }
 
 #[tauri::command]
@@ -792,34 +812,49 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
 }
 
 #[tauri::command]
-fn list_articles(app: AppHandle, feed_id: Option<String>) -> Result<Vec<Article>, String> {
+fn list_articles(app: AppHandle, feed_id: Option<String>, read_filter: Option<String>) -> Result<Vec<Article>, String> {
     let conn = open_database(&app)?;
-    list_articles_by_feed(&conn, feed_id.as_deref())
+    list_articles_by_feed(&conn, feed_id.as_deref(), read_filter.as_deref())
 }
 
-fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec<Article>, String> {
+fn read_filter_sql(read_filter: Option<&str>) -> Result<&'static str, String> {
+    match read_filter.unwrap_or("all") {
+        "all" => Ok(""),
+        "unread" => Ok(" AND read_status = 0"),
+        "read" => Ok(" AND read_status = 1"),
+        other => Err(format!("Unsupported read filter: {other}")),
+    }
+}
+
+fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>, read_filter: Option<&str>) -> Result<Vec<Article>, String> {
+    let filter_sql = read_filter_sql(read_filter)?;
     let sql = match feed_id {
         Some(_) => {
-            "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
-                    raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                     content_fetch_status, content_fetch_error, final_url, summary, translation,
-                     is_favorite, read_later
-             FROM articles
-             WHERE feed_id = ?1
-             ORDER BY published_at DESC, created_at DESC"
+            format!(
+                "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
+                        read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                         content_fetch_status, content_fetch_error, final_url, summary, translation,
+                         is_favorite, read_later
+                 FROM articles
+                 WHERE feed_id = ?1{filter_sql}
+                 ORDER BY published_at DESC, created_at DESC"
+            )
         }
         None => {
-            "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
-                    raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                     content_fetch_status, content_fetch_error, final_url, summary, translation,
-                     is_favorite, read_later
-             FROM articles
-             ORDER BY published_at DESC, created_at DESC"
+            format!(
+                "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
+                        read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                         content_fetch_status, content_fetch_error, final_url, summary, translation,
+                         is_favorite, read_later
+                 FROM articles
+                 WHERE 1 = 1{filter_sql}
+                 ORDER BY published_at DESC, created_at DESC"
+            )
         }
     };
 
     let mut stmt = conn
-        .prepare(sql)
+        .prepare(&sql)
         .map_err(|error| format!("Failed to prepare article query: {error}"))?;
     let mut result = Vec::new();
 
@@ -1024,14 +1059,14 @@ fn search_articles(
     let conn = open_database(&app)?;
     let trimmed_query = query.trim();
     if trimmed_query.is_empty() {
-        return list_articles_by_feed(&conn, feed_id.as_deref());
+        return list_articles_by_feed(&conn, feed_id.as_deref(), None);
     }
 
     let pattern = format!("%{trimmed_query}%");
     let mut stmt = conn
         .prepare(
             "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
-                    raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                    read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
                     content_fetch_status, content_fetch_error, final_url, summary, translation,
                     is_favorite, read_later
              FROM articles
@@ -1255,6 +1290,286 @@ async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article,
     load_article_by_id(&conn, &saved_id)
 }
 
+fn load_unread_summary(conn: &Connection) -> Result<UnreadSummary, String> {
+    let total_unread: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE read_status = 0",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to query total unread: {e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT f.id, f.title, COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread
+             FROM feeds f
+             LEFT JOIN articles a ON a.feed_id = f.id
+             GROUP BY f.id
+             ORDER BY f.title ASC",
+        )
+        .map_err(|e| format!("Failed to prepare unread query: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(FeedUnread {
+                feed_id: row.get(0)?,
+                feed_title: row.get(1)?,
+                unread: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query unread counts: {e}"))?;
+
+    let mut feed_unread = Vec::new();
+    for row in rows {
+        feed_unread.push(row.map_err(|e| format!("Failed to read unread row: {e}"))?);
+    }
+
+    Ok(UnreadSummary {
+        total_unread,
+        feed_unread,
+    })
+}
+
+#[tauri::command]
+fn set_article_read_status(
+    app: AppHandle,
+    article_id: String,
+    is_read: bool,
+) -> Result<Article, String> {
+    let conn = open_database(&app)?;
+    let read_status = if is_read { 1 } else { 0 };
+    let changed = conn
+        .execute(
+            "UPDATE articles
+             SET read_status = ?2, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1",
+            params![article_id, read_status],
+        )
+        .map_err(|e| format!("Failed to update read status: {e}"))?;
+
+    if changed == 0 {
+        return Err(format!("Article {article_id} was not found"));
+    }
+
+    load_article_by_id(&conn, &article_id)
+}
+
+#[tauri::command]
+fn mark_articles_read(
+    app: AppHandle,
+    feed_id: Option<String>,
+    article_ids: Option<Vec<String>>,
+) -> Result<UnreadSummary, String> {
+    let mut conn = open_database(&app)?;
+
+    if let Some(ids) = article_ids.filter(|ids| !ids.is_empty()) {
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to start transaction: {e}"))?;
+        for article_id in ids {
+            tx.execute(
+                "UPDATE articles
+                 SET read_status = 1, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                params![article_id],
+            )
+            .map_err(|e| format!("Failed to mark article read: {e}"))?;
+        }
+        tx.commit()
+            .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+    } else if let Some(id) = feed_id {
+        conn.execute(
+            "UPDATE articles
+             SET read_status = 1, updated_at = CURRENT_TIMESTAMP
+             WHERE feed_id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("Failed to mark feed articles read: {e}"))?;
+    } else {
+        conn.execute(
+            "UPDATE articles
+             SET read_status = 1, updated_at = CURRENT_TIMESTAMP",
+            [],
+        )
+        .map_err(|e| format!("Failed to mark all articles read: {e}"))?;
+    }
+
+    load_unread_summary(&conn)
+}
+
+fn load_setting_value(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .map(Some)
+    .or_else(|e| {
+        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+            Ok(None)
+        } else {
+            Err(format!("Failed to load setting '{key}': {e}"))
+        }
+    })
+}
+
+fn get_llm_config_from_db(conn: &Connection) -> Result<LlmConfig, String> {
+    let base_url = load_setting_value(conn, "llm_base_url")?
+        .ok_or("LLM Base URL not configured. Please set it in Settings.".to_string())?;
+    let api_key = load_setting_value(conn, "llm_api_key")?
+        .ok_or("LLM API Key not configured. Please set it in Settings.".to_string())?;
+    let model_name = load_setting_value(conn, "llm_model_name")?
+        .ok_or("LLM Model Name not configured. Please set it in Settings.".to_string())?;
+
+    Ok(LlmConfig {
+        base_url,
+        api_key,
+        model_name,
+    })
+}
+
+#[tauri::command]
+fn save_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
+    let conn = open_database(&app)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )
+    .map_err(|error| format!("Failed to save setting: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_setting(app: AppHandle, key: String) -> Result<Option<String>, String> {
+    let conn = open_database(&app)?;
+    load_setting_value(&conn, &key)
+}
+
+#[tauri::command]
+fn get_llm_config(app: AppHandle) -> Result<LlmConfig, String> {
+    let conn = open_database(&app)?;
+    get_llm_config_from_db(&conn)
+}
+
+#[tauri::command]
+fn summarize_article(
+    app: AppHandle,
+    article_id: String,
+    force: Option<bool>,
+) -> Result<String, String> {
+    let conn = open_database(&app)?;
+
+    if force != Some(true) {
+        let cached: Option<String> = conn
+            .query_row(
+                "SELECT summary FROM articles WHERE id = ?1",
+                params![article_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+
+        if let Some(ref s) = cached {
+            if !s.is_empty() {
+                return Ok(s.clone());
+            }
+        }
+    }
+
+    let content: String = conn
+        .query_row(
+            "SELECT content FROM articles WHERE id = ?1",
+            params![article_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Article not found: {e}"))?;
+
+    let config = get_llm_config_from_db(&conn)?;
+    let prompt = format!(
+        "Please provide a concise summary of the following article in 2-3 sentences:\n\n{}",
+        content
+    );
+    let summary = llm_provider::call_llm(
+        &config,
+        "You are a helpful assistant that summarizes articles concisely.",
+        &prompt,
+    )?;
+
+    conn.execute(
+        "UPDATE articles SET summary = ?1 WHERE id = ?2",
+        params![summary, article_id],
+    )
+    .map_err(|e| format!("Failed to save summary: {e}"))?;
+
+    Ok(summary)
+}
+
+#[tauri::command]
+fn translate_article(
+    app: AppHandle,
+    article_id: String,
+    target_lang: String,
+) -> Result<String, String> {
+    let conn = open_database(&app)?;
+
+    let cached: Option<String> = conn
+        .query_row(
+            "SELECT translation FROM articles WHERE id = ?1",
+            params![article_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    if let Some(ref s) = cached {
+        if !s.is_empty() {
+            return Ok(s.clone());
+        }
+    }
+
+    let content: String = conn
+        .query_row(
+            "SELECT content FROM articles WHERE id = ?1",
+            params![article_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Article not found: {e}"))?;
+
+    let config = get_llm_config_from_db(&conn)?;
+
+    let lang_name = match target_lang.as_str() {
+        "zh" => "Chinese",
+        "en" => "English",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        _ => &target_lang,
+    };
+
+    let prompt = format!(
+        "Please translate the following article into {}. Preserve the original meaning and tone:\n\n{}",
+        lang_name, content
+    );
+    let translation = llm_provider::call_llm(
+        &config,
+        &format!(
+            "You are a professional translator. Translate the user's text into {}.",
+            lang_name
+        ),
+        &prompt,
+    )?;
+
+    conn.execute(
+        "UPDATE articles SET translation = ?1 WHERE id = ?2",
+        params![translation, article_id],
+    )
+    .map_err(|e| format!("Failed to save translation: {e}"))?;
+
+    Ok(translation)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1267,6 +1582,8 @@ pub fn run() {
             get_article,
             set_article_favorite,
             set_article_read_later,
+            set_article_read_status,
+            mark_articles_read,
             list_annotations,
             create_annotation,
             update_annotation,
@@ -1279,6 +1596,11 @@ pub fn run() {
             sync::retry_failed_syncs,
             sync::get_sync_config,
             sync::update_sync_config,
+            save_setting,
+            load_setting,
+            get_llm_config,
+            summarize_article,
+            translate_article,
             clean_article,
             fetch_and_clean_article,
             opml::import_opml,

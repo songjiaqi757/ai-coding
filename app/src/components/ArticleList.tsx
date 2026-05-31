@@ -1,103 +1,115 @@
-import { useState, type FormEvent } from "react";
-import type { Article } from "../types";
+import type { Article, ReadFilter } from "../types";
 
 type Props = {
   articles: Article[];
   selectedArticleId: string | null;
   isLoading: boolean;
-  isFetchingArticle: boolean;
-  fetchError: string | null;
-  onFetchArticle: (url: string) => void;
+  readFilter: ReadFilter;
+  isUpdatingReadStatus: boolean;
   onSelectArticle: (id: string) => void;
+  onReadFilterChange: (filter: ReadFilter) => void;
+  onToggleReadStatus: (article: Article) => void;
+  onMarkCurrentFeedRead: () => void;
 };
-
-function stripHtml(value: string) {
-  return value.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-}
-
-function truncate(value: string, maxLength: number) {
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, maxLength).trimEnd()}...`;
-}
-
-function getPreview(article: Article) {
-  const preview = stripHtml(
-    article.excerpt || article.content || article.cleanedHtml || "",
-  );
-  return truncate(preview, 140);
-}
 
 export function ArticleList({
   articles,
   selectedArticleId,
   isLoading,
-  isFetchingArticle,
-  fetchError,
-  onFetchArticle,
+  readFilter,
+  isUpdatingReadStatus,
   onSelectArticle,
+  onReadFilterChange,
+  onToggleReadStatus,
+  onMarkCurrentFeedRead,
 }: Props) {
-  const [articleUrl, setArticleUrl] = useState("");
-
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const url = articleUrl.trim();
-    if (!url || isFetchingArticle) return;
-    onFetchArticle(url);
-    setArticleUrl("");
-  }
-
   return (
     <section className="article-list">
       <div className="toolbar">
         <div>
-          <h2>文章</h2>
-          <p>{isLoading ? "加载中..." : `${articles.length} 篇文章`}</p>
+          <h2>Articles</h2>
+          <p>
+            {isLoading ? "加载中..." : `${articles.length} 篇文章`}
+          </p>
         </div>
+        <button
+          type="button"
+          className="mark-read-button"
+          onClick={onMarkCurrentFeedRead}
+          disabled={isUpdatingReadStatus || articles.length === 0}
+        >
+          全部标为已读
+        </button>
       </div>
 
-      <form className="url-fetcher" onSubmit={handleSubmit}>
-        <input
-          placeholder="输入文章 URL..."
-          value={articleUrl}
-          onChange={(event) => setArticleUrl(event.target.value)}
-          disabled={isFetchingArticle}
-        />
-        <button
-          className="primary-button"
-          type="submit"
-          disabled={isFetchingArticle}
-        >
-          {isFetchingArticle ? "抓取中..." : "抓取"}
-        </button>
-      </form>
+      <div className="segmented-control">
+        {(["all", "unread", "read"] as const).map((value) => (
+          <button
+            type="button"
+            key={value}
+            className={readFilter === value ? "active" : ""}
+            onClick={() => onReadFilterChange(value)}
+          >
+            {value === "all" ? "全部" : value === "unread" ? "未读" : "已读"}
+          </button>
+        ))}
+      </div>
 
-      {fetchError && <div className="error-box">{fetchError}</div>}
+      <div className="search-box">
+        <input placeholder="搜索文章..." />
+      </div>
 
       <div className="cards">
         {articles.length === 0 && !isLoading && (
-          <div className="empty-state">暂无文章，请添加订阅源或刷新</div>
+          <div className="empty-state">
+            暂无文章，请添加订阅源或刷新
+          </div>
         )}
         {articles.map((article) => (
-          <button
+          <article
             key={article.id}
             className={
-              article.id === selectedArticleId
-                ? "article-card active"
-                : "article-card"
+              [
+                "article-card",
+                article.id === selectedArticleId ? "active" : "",
+                article.isRead ? "read" : "unread",
+              ]
+                .filter(Boolean)
+                .join(" ")
             }
-            onClick={() => onSelectArticle(article.id)}
           >
-            <div className="article-meta">
-              <span>{article.author ?? "未知作者"}</span>
-              <span>
-                {article.publishedAt
-                  ? new Date(article.publishedAt).toLocaleDateString("zh-CN")
-                  : ""}
+            <div className="article-card-header">
+              <span className="article-meta">
+                <span className={article.isRead ? "read-state" : "read-state unread"}>
+                  {article.isRead ? "已读" : "未读"}
+                </span>
+                <span>{article.author ?? "未知作者"}</span>
+                <span>
+                  {article.publishedAt
+                    ? new Date(article.publishedAt).toLocaleDateString("zh-CN")
+                    : ""}
+                </span>
               </span>
+              <button
+                type="button"
+                className="read-toggle"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleReadStatus(article);
+                }}
+              >
+                标为{article.isRead ? "未读" : "已读"}
+              </button>
             </div>
-            <h3>{article.title}</h3>
-            <p>{getPreview(article)}</p>
-          </button>
+            <button
+              type="button"
+              className="article-card-main"
+              onClick={() => onSelectArticle(article.id)}
+            >
+              <span className="article-card-title">{article.title}</span>
+              <span className="article-card-excerpt">{article.excerpt}</span>
+            </button>
+          </article>
         ))}
       </div>
     </section>
