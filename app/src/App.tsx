@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Sidebar } from "./components/Sidebar";
 import { ArticleList } from "./components/ArticleList";
-import type { Feed, Article } from "./types";
+import type { Feed, Article, ReadFilter, UnreadSummary } from "./types";
 import "./App.css";
 
 /* ── Extended Article type with AI-generated fields ── */
@@ -22,7 +22,9 @@ function App() {
   const [articles, setArticles] = useState<ArticleWithAI[]>([]);
   const [selectedFeedId, setSelectedFeedId] = useState("all");
   const [selectedArticleId, setSelectedArticleId] = useState<string | null>(null);
+  const [readFilter, setReadFilter] = useState<ReadFilter>("all");
   const [isLoading, setIsLoading] = useState(true);
+  const [isUpdatingReadStatus, setIsUpdatingReadStatus] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // AI feature states
@@ -35,22 +37,25 @@ function App() {
   const [readView, setReadView] = useState<ReadView>("original");
   const [targetLang, setTargetLang] = useState("zh");
 
-  async function loadData() {
+  const loadData = useCallback(async (feedId = selectedFeedId, filter = readFilter) => {
     try {
       setIsLoading(true);
       setErrorMessage(null);
+      const listFeedId = feedId === "all" ? null : feedId;
 
       const [nextFeeds, nextArticles] = await Promise.all([
         invoke<Feed[]>("list_feeds"),
-        invoke<Article[]>("list_articles", { feedId: null }),
+        invoke<Article[]>("list_articles", { feedId: listFeedId, readFilter: filter }),
       ]);
 
       setFeeds(nextFeeds);
       setArticles(nextArticles);
 
-      if (nextArticles.length > 0) {
-        setSelectedArticleId((current) => current ?? nextArticles[0].id);
-      }
+      setSelectedArticleId((current) =>
+        nextArticles.some((article) => article.id === current)
+          ? current
+          : nextArticles[0]?.id ?? null,
+      );
     } catch {
       /* Pure frontend dev — Tauri invoke unavailable, fall back to mock */
       setFeeds(MOCK_FEEDS);
@@ -59,13 +64,60 @@ function App() {
     } finally {
       setIsLoading(false);
     }
-  }
+  }, [selectedFeedId, readFilter]);
 
   useEffect(() => {
     void loadData();
+  }, [loadData]);
+
+  const refreshFeeds = useCallback(async () => {
+    try {
+      setFeeds(await invoke<Feed[]>("list_feeds"));
+    } catch {
+      setFeeds(MOCK_FEEDS);
+    }
   }, []);
 
-  async function loadSettings() {
+  async function handleToggleReadStatus(article: ArticleWithAI) {
+    try {
+      setIsUpdatingReadStatus(true);
+      const updated = await invoke<Article>("set_article_read_status", {
+        articleId: article.id,
+        isRead: !article.isRead,
+      });
+      setArticles((prev) => {
+        const next = prev.map((item) =>
+          item.id === updated.id ? { ...item, ...updated } : item,
+        );
+        if (readFilter === "all") return next;
+        return next.filter((item) =>
+          readFilter === "read" ? item.isRead : !item.isRead,
+        );
+      });
+      await refreshFeeds();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsUpdatingReadStatus(false);
+    }
+  }
+
+  async function handleMarkCurrentFeedRead() {
+    try {
+      setIsUpdatingReadStatus(true);
+      await invoke<UnreadSummary>("mark_articles_read", {
+        feedId: selectedFeedId === "all" ? null : selectedFeedId,
+        articleIds: null,
+      });
+      await loadData();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsUpdatingReadStatus(false);
+    }
+  }
+
+  const loadSettings = useCallback(async () => {
     try {
       const [baseUrl, apiKey, modelName] = await Promise.all([
         invoke<string | null>("load_setting", { key: "llm_base_url" }),
@@ -80,13 +132,13 @@ function App() {
     } catch {
       // Settings not configured yet
     }
-  }
+  }, []);
 
   useEffect(() => {
     if (showSettings) {
       void loadSettings();
     }
-  }, [showSettings]);
+  }, [showSettings, loadSettings]);
 
   async function handleSaveSettings() {
     try {
@@ -143,10 +195,7 @@ function App() {
     }
   }
 
-  const visibleArticles = useMemo(() => {
-    if (selectedFeedId === "all") return articles;
-    return articles.filter((a) => a.feedId === selectedFeedId);
-  }, [articles, selectedFeedId]);
+  const visibleArticles = articles;
 
   const selectedArticle = useMemo(
     () =>
@@ -168,7 +217,12 @@ function App() {
         articles={visibleArticles}
         selectedArticleId={selectedArticle?.id ?? null}
         isLoading={isLoading}
+        readFilter={readFilter}
+        isUpdatingReadStatus={isUpdatingReadStatus}
         onSelectArticle={setSelectedArticleId}
+        onReadFilterChange={setReadFilter}
+        onToggleReadStatus={handleToggleReadStatus}
+        onMarkCurrentFeedRead={handleMarkCurrentFeedRead}
       />
 
       <article className="reader">
@@ -189,6 +243,7 @@ function App() {
               </div>
               <div className="reader-actions">
                 <button
+                  type="button"
                   onClick={() => handleSummarize()}
                   disabled={isSummarizing}
                   className={isSummarizing ? "action-loading" : ""}
@@ -196,6 +251,7 @@ function App() {
                   {isSummarizing ? "Summarizing..." : selectedArticle.summary ? "Regenerate Summary" : "Summary"}
                 </button>
                 <button
+                  type="button"
                   onClick={() => handleTranslate()}
                   disabled={isTranslating}
                   className={isTranslating ? "action-loading" : ""}
@@ -213,6 +269,7 @@ function App() {
                   <option value="ko">Korean</option>
                 </select>
                 <button
+                  type="button"
                   className="settings-toggle-btn"
                   onClick={() => setShowSettings(true)}
                   title="LLM Settings"
@@ -234,18 +291,21 @@ function App() {
             {selectedArticle.translation && (
               <div className="view-tabs">
                 <button
+                  type="button"
                   className={readView === "original" ? "view-tab active" : "view-tab"}
                   onClick={() => setReadView("original")}
                 >
                   Original
                 </button>
                 <button
+                  type="button"
                   className={readView === "translation" ? "view-tab active" : "view-tab"}
                   onClick={() => setReadView("translation")}
                 >
                   Translation
                 </button>
                 <button
+                  type="button"
                   className={readView === "bilingual" ? "view-tab active" : "view-tab"}
                   onClick={() => setReadView("bilingual")}
                 >
@@ -276,8 +336,8 @@ function App() {
 
       {/* Settings Modal */}
       {showSettings && (
-        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay">
+          <div className="modal-content">
             <h2>LLM Settings</h2>
             <p className="modal-desc">
               Configure your LLM provider. Supports OpenAI, DeepSeek, Ollama, and any OpenAI-compatible API.
@@ -313,10 +373,10 @@ function App() {
               </label>
 
               <div className="modal-actions">
-                <button className="primary-button" onClick={handleSaveSettings} disabled={isSavingSettings}>
+                <button type="button" className="primary-button" onClick={handleSaveSettings} disabled={isSavingSettings}>
                   {isSavingSettings ? "Saving..." : "Save"}
                 </button>
-                <button onClick={() => setShowSettings(false)}>Cancel</button>
+                <button type="button" onClick={() => setShowSettings(false)}>Cancel</button>
               </div>
             </div>
           </div>

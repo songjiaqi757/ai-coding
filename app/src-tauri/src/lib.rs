@@ -2,7 +2,7 @@ mod llm_provider;
 mod opml;
 
 use llm_provider::LlmConfig;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
@@ -31,8 +31,24 @@ pub struct Article {
     pub published_at: Option<String>,
     pub excerpt: String,
     pub content: String,
+    pub is_read: bool,
     summary: Option<String>,
     translation: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedUnread {
+    pub feed_id: String,
+    pub feed_title: String,
+    pub unread: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreadSummary {
+    pub total_unread: i64,
+    pub feed_unread: Vec<FeedUnread>,
 }
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -111,6 +127,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE articles ADD COLUMN guid TEXT",
         "ALTER TABLE articles ADD COLUMN author TEXT",
         "ALTER TABLE articles ADD COLUMN raw_html TEXT",
+        "ALTER TABLE articles ADD COLUMN read_status INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE articles ADD COLUMN summary TEXT",
         "ALTER TABLE articles ADD COLUMN translation TEXT",
     ];
@@ -264,7 +281,7 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
     )
     .map_err(|e| format!("更新同步时间失败: {e}"))?;
 
-    list_articles_by_feed(&conn, Some(&feed_id))
+    list_articles_by_feed(&conn, Some(&feed_id), None)
 }
 
 fn load_setting_value(conn: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -334,23 +351,63 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
 }
 
 #[tauri::command]
-fn list_articles(app: AppHandle, feed_id: Option<String>) -> Result<Vec<Article>, String> {
+fn list_articles(
+    app: AppHandle,
+    feed_id: Option<String>,
+    read_filter: Option<String>,
+) -> Result<Vec<Article>, String> {
     let conn = open_database(&app)?;
-    list_articles_by_feed(&conn, feed_id.as_deref())
+    list_articles_by_feed(&conn, feed_id.as_deref(), read_filter.as_deref())
 }
 
-fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec<Article>, String> {
+fn article_from_row(row: &Row<'_>) -> rusqlite::Result<Article> {
+    let read_status: i64 = row.get(8)?;
+    Ok(Article {
+        id: row.get(0)?,
+        feed_id: row.get(1)?,
+        title: row.get(2)?,
+        url: row.get(3)?,
+        author: row.get(4)?,
+        published_at: row.get(5)?,
+        excerpt: row.get(6)?,
+        content: row.get(7)?,
+        is_read: read_status == 1,
+        summary: row.get(9)?,
+        translation: row.get(10)?,
+    })
+}
+
+fn read_filter_sql(read_filter: Option<&str>) -> Result<&'static str, String> {
+    match read_filter.unwrap_or("all") {
+        "all" => Ok(""),
+        "unread" => Ok(" AND read_status = 0"),
+        "read" => Ok(" AND read_status = 1"),
+        other => Err(format!("Unsupported read filter: {other}")),
+    }
+}
+
+fn list_articles_by_feed(
+    conn: &Connection,
+    feed_id: Option<&str>,
+    read_filter: Option<&str>,
+) -> Result<Vec<Article>, String> {
+    let filter_sql = read_filter_sql(read_filter)?;
     let (sql, param): (String, Option<String>) = match feed_id {
         Some(id) => (
-            "SELECT id, feed_id, title, url, author, published_at, excerpt, content, summary, translation
-             FROM articles WHERE feed_id = ?1
-             ORDER BY published_at DESC, created_at DESC".to_string(),
+            format!(
+                "SELECT id, feed_id, title, url, author, published_at, excerpt, content, read_status, summary, translation
+                 FROM articles WHERE feed_id = ?1{filter_sql}
+                 ORDER BY published_at DESC, created_at DESC"
+            ),
             Some(id.to_string()),
         ),
         None => (
-            "SELECT id, feed_id, title, url, author, published_at, excerpt, content, summary, translation
-             FROM articles
-             ORDER BY published_at DESC, created_at DESC".to_string(),
+            format!(
+                "SELECT id, feed_id, title, url, author, published_at, excerpt, content, read_status, summary, translation
+                 FROM articles
+                 WHERE 1 = 1{filter_sql}
+                 ORDER BY published_at DESC, created_at DESC"
+            ),
             None,
         ),
     };
@@ -363,20 +420,7 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
         Some(p) => {
             let mut result = Vec::new();
             let rows = stmt
-                .query_map(params![p], |row| {
-                    Ok(Article {
-                        id: row.get(0)?,
-                        feed_id: row.get(1)?,
-                        title: row.get(2)?,
-                        url: row.get(3)?,
-                        author: row.get(4)?,
-                        published_at: row.get(5)?,
-                        excerpt: row.get(6)?,
-                        content: row.get(7)?,
-                        summary: row.get(8)?,
-                        translation: row.get(9)?,
-                    })
-                })
+                .query_map(params![p], article_from_row)
                 .map_err(|e| format!("查询失败: {e}"))?;
             for row in rows {
                 result.push(row.map_err(|e| format!("读取行失败: {e}"))?);
@@ -386,20 +430,7 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
         None => {
             let mut result = Vec::new();
             let rows = stmt
-                .query_map([], |row| {
-                    Ok(Article {
-                        id: row.get(0)?,
-                        feed_id: row.get(1)?,
-                        title: row.get(2)?,
-                        url: row.get(3)?,
-                        author: row.get(4)?,
-                        published_at: row.get(5)?,
-                        excerpt: row.get(6)?,
-                        content: row.get(7)?,
-                        summary: row.get(8)?,
-                        translation: row.get(9)?,
-                    })
-                })
+                .query_map([], article_from_row)
                 .map_err(|e| format!("查询失败: {e}"))?;
             for row in rows {
                 result.push(row.map_err(|e| format!("读取行失败: {e}"))?);
@@ -409,6 +440,124 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>) -> Result<Vec
     };
 
     Ok(rows)
+}
+
+fn load_article_by_id(conn: &Connection, article_id: &str) -> Result<Article, String> {
+    conn.query_row(
+        "SELECT id, feed_id, title, url, author, published_at, excerpt, content, read_status, summary, translation
+         FROM articles
+         WHERE id = ?1",
+        params![article_id],
+        article_from_row,
+    )
+    .map_err(|e| format!("Article not found: {e}"))
+}
+
+fn load_unread_summary(conn: &Connection) -> Result<UnreadSummary, String> {
+    let total_unread = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE read_status = 0",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询总未读数失败: {e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT f.id, f.title, COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread
+             FROM feeds f
+             LEFT JOIN articles a ON a.feed_id = f.id
+             GROUP BY f.id
+             ORDER BY f.title ASC",
+        )
+        .map_err(|e| format!("准备未读数查询失败: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(FeedUnread {
+                feed_id: row.get(0)?,
+                feed_title: row.get(1)?,
+                unread: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("查询未读数失败: {e}"))?;
+
+    let mut feed_unread = Vec::new();
+    for row in rows {
+        feed_unread.push(row.map_err(|e| format!("读取未读数行失败: {e}"))?);
+    }
+
+    Ok(UnreadSummary {
+        total_unread,
+        feed_unread,
+    })
+}
+
+#[tauri::command]
+fn set_article_read_status(
+    app: AppHandle,
+    article_id: String,
+    is_read: bool,
+) -> Result<Article, String> {
+    let conn = open_database(&app)?;
+    let read_status = if is_read { 1 } else { 0 };
+    let changed = conn
+        .execute(
+            "UPDATE articles
+             SET read_status = ?2, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1",
+            params![article_id, read_status],
+        )
+        .map_err(|e| format!("Failed to update read status: {e}"))?;
+
+    if changed == 0 {
+        return Err(format!("Article {article_id} was not found"));
+    }
+
+    load_article_by_id(&conn, &article_id)
+}
+
+#[tauri::command]
+fn mark_articles_read(
+    app: AppHandle,
+    feed_id: Option<String>,
+    article_ids: Option<Vec<String>>,
+) -> Result<UnreadSummary, String> {
+    let mut conn = open_database(&app)?;
+
+    if let Some(ids) = article_ids.filter(|ids| !ids.is_empty()) {
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to start article update transaction: {e}"))?;
+        for article_id in ids {
+            tx.execute(
+                "UPDATE articles
+                 SET read_status = 1, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                params![article_id],
+            )
+            .map_err(|e| format!("Failed to mark article read: {e}"))?;
+        }
+        tx.commit()
+            .map_err(|e| format!("Failed to save article read updates: {e}"))?;
+    } else if let Some(id) = feed_id {
+        conn.execute(
+            "UPDATE articles
+             SET read_status = 1, updated_at = CURRENT_TIMESTAMP
+             WHERE feed_id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("Failed to mark feed articles read: {e}"))?;
+    } else {
+        conn.execute(
+            "UPDATE articles
+             SET read_status = 1, updated_at = CURRENT_TIMESTAMP",
+            [],
+        )
+        .map_err(|e| format!("Failed to mark all articles read: {e}"))?;
+    }
+
+    load_unread_summary(&conn)
 }
 
 #[tauri::command]
@@ -569,6 +718,8 @@ pub fn run() {
             save_setting,
             load_setting,
             get_llm_config,
+            set_article_read_status,
+            mark_articles_read,
             summarize_article,
             translate_article,
         ])

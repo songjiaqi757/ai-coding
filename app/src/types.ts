@@ -16,4 +16,18 @@ export type Article = {
   publishedAt: string | null;
   excerpt: string;
   content: string;
+  isRead: boolean;
+};
+
+export type ReadFilter = "all" | "unread" | "read";
+
+export type FeedUnread = {
+  feedId: string;
+  feedTitle: string;
+  unread: number;
+};
+
+export type UnreadSummary = {
+  totalUnread: number;
+  feedUnread: FeedUnread[];
 };
