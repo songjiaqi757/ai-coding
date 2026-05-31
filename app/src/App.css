@@ -843,3 +843,36 @@ button {
 .retry-button:hover {
   background: #b91c1c;
 }
+
+/* Sync config panel */
+.sync-config-section {
+  border-top: 1px solid #e2e8f0;
+  padding-top: 8px;
+  margin-top: auto;
+}
+
+.sync-config-panel {
+  padding: 8px 12px;
+}
+
+.sync-config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 13px;
+  color: #475569;
+}
+
+.sync-config-row input[type="number"] {
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 13px;
+}
+
+.sync-config-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}

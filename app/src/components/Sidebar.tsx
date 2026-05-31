@@ -1,6 +1,6 @@
-import { useState, type MouseEvent } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Article, Feed, SyncStatus, SyncReport } from "../types";
+import type { Article, Feed, SyncStatus, SyncReport, SyncConfig } from "../types";
 
 type Props = {
   feeds: Feed[];
@@ -28,6 +28,44 @@ export function Sidebar({
   const [opmlError, setOpmlError] = useState<string | null>(null);
   const [refreshingFeedId, setRefreshingFeedId] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [showSyncConfig, setShowSyncConfig] = useState(false);
+  const [syncConfig, setSyncConfig] = useState<SyncConfig>({
+    enabled: false,
+    intervalMinutes: 30,
+    retryLimit: 3,
+    nextSyncAt: null,
+  });
+  const [isSavingSyncConfig, setIsSavingSyncConfig] = useState(false);
+
+  useEffect(() => {
+    void loadSyncConfig();
+  }, []);
+
+  async function loadSyncConfig() {
+    try {
+      const config = await invoke<SyncConfig>("get_sync_config");
+      setSyncConfig(config);
+    } catch {
+      // Config not available yet
+    }
+  }
+
+  async function handleSaveSyncConfig() {
+    setIsSavingSyncConfig(true);
+    try {
+      const updated = await invoke<SyncConfig>("update_sync_config", {
+        enabled: syncConfig.enabled,
+        intervalMinutes: syncConfig.intervalMinutes,
+        retryLimit: syncConfig.retryLimit,
+      });
+      setSyncConfig(updated);
+      setShowSyncConfig(false);
+    } catch (error) {
+      console.error("保存同步配置失败", error);
+    } finally {
+      setIsSavingSyncConfig(false);
+    }
+  }
 
   async function handleAddFeed() {
     if (!addUrl.trim()) return;
@@ -250,6 +288,71 @@ export function Sidebar({
             </div>
           ))}
         </div>
+      </section>
+
+      <section className="panel-section sync-config-section">
+        <div className="section-header">
+          <div className="section-title">同步设置</div>
+          <button
+            className="icon-button"
+            title="展开/收起"
+            onClick={() => setShowSyncConfig(!showSyncConfig)}
+          >
+            {showSyncConfig ? "−" : "+"}
+          </button>
+        </div>
+        {showSyncConfig && (
+          <div className="sync-config-panel">
+            <label className="sync-config-row">
+              <span>自动同步</span>
+              <input
+                type="checkbox"
+                checked={syncConfig.enabled}
+                onChange={(e) =>
+                  setSyncConfig((c) => ({ ...c, enabled: e.target.checked }))
+                }
+              />
+            </label>
+            <label className="sync-config-row">
+              <span>间隔（分钟）</span>
+              <input
+                type="number"
+                min={1}
+                value={syncConfig.intervalMinutes}
+                onChange={(e) =>
+                  setSyncConfig((c) => ({
+                    ...c,
+                    intervalMinutes: Number(e.target.value) || 30,
+                  }))
+                }
+                style={{ width: 60 }}
+              />
+            </label>
+            <label className="sync-config-row">
+              <span>最大重试次数</span>
+              <input
+                type="number"
+                min={0}
+                value={syncConfig.retryLimit}
+                onChange={(e) =>
+                  setSyncConfig((c) => ({
+                    ...c,
+                    retryLimit: Number(e.target.value) || 3,
+                  }))
+                }
+                style={{ width: 60 }}
+              />
+            </label>
+            <button
+              className="primary-button"
+              onClick={handleSaveSyncConfig}
+              disabled={isSavingSyncConfig}
+              style={{ marginTop: 8, width: "100%" }}
+            >
+              {isSavingSyncConfig ? "保存中..." : "保存配置"}
+            </button>
+          </div>
+        )}
       </section>
 
       {showAddDialog && (
