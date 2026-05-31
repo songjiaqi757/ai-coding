@@ -1,23 +1,23 @@
 import { useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Article, Feed } from "../types";
+import type { Article, Feed, SyncStatus, SyncReport } from "../types";
 
 type Props = {
   feeds: Feed[];
   selectedFeedId: string;
-  favoriteCount: number;
-  readLaterCount: number;
+  syncStatus: SyncStatus | null;
   onSelectFeed: (id: string) => void;
   onFeedsChange: () => void;
+  onSyncStatusChange: () => void;
 };
 
 export function Sidebar({
   feeds,
   selectedFeedId,
-  favoriteCount,
-  readLaterCount,
+  syncStatus,
   onSelectFeed,
   onFeedsChange,
+  onSyncStatusChange,
 }: Props) {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [addUrl, setAddUrl] = useState("");
@@ -27,10 +27,7 @@ export function Sidebar({
   const [opmlStatus, setOpmlStatus] = useState<string | null>(null);
   const [opmlError, setOpmlError] = useState<string | null>(null);
   const [refreshingFeedId, setRefreshingFeedId] = useState<string | null>(null);
-  const [refreshToast, setRefreshToast] = useState<{
-    type: "success" | "error";
-    message: string;
-  } | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   async function handleAddFeed() {
     if (!addUrl.trim()) return;
@@ -55,19 +52,36 @@ export function Sidebar({
   async function handleRefreshFeed(feedId: string, event: MouseEvent) {
     event.stopPropagation();
     setRefreshingFeedId(feedId);
-
     try {
       await invoke<Article[]>("refresh_feed", { feedId });
       onFeedsChange();
-      setRefreshToast({ type: "success", message: "刷新成功" });
     } catch (error) {
       console.error("刷新失败", error);
-      setRefreshToast({ type: "error", message: "刷新失败" });
     } finally {
       setRefreshingFeedId(null);
-      setTimeout(() => {
-        setRefreshToast(null);
-      }, 3000);
+    }
+  }
+
+  async function handleStartSync() {
+    setIsSyncing(true);
+    try {
+      await invoke<SyncReport>("start_sync", { feedId: null });
+      onSyncStatusChange();
+      onFeedsChange();
+    } catch (error) {
+      console.error("同步失败", error);
+    } finally {
+      setIsSyncing(false);
+    }
+  }
+
+  async function handleRetryFailed() {
+    try {
+      await invoke<SyncReport>("retry_failed_syncs");
+      onSyncStatusChange();
+      onFeedsChange();
+    } catch (error) {
+      console.error("重试失败", error);
     }
   }
 
@@ -94,7 +108,6 @@ export function Sidebar({
           : "导入 OPML 失败";
       setOpmlError(message);
       setOpmlStatus(null);
-      console.error("导入 OPML 失败", error);
     } finally {
       setIsImporting(false);
     }
@@ -112,9 +125,8 @@ export function Sidebar({
       await invoke("export_opml", { filePath });
       setOpmlStatus("OPML 导出成功");
       setOpmlError(null);
-    } catch (error) {
+    } catch {
       setOpmlError("导出 OPML 失败");
-      console.error("导出 OPML 失败", error);
     }
   }
 
@@ -126,24 +138,9 @@ export function Sidebar({
     unread: feeds.reduce((sum, feed) => sum + feed.unread, 0),
     lastSyncAt: null,
   };
-  const smartFeeds: Feed[] = [
-    {
-      id: "favorites",
-      title: "Favorites",
-      url: "",
-      siteUrl: null,
-      unread: favoriteCount,
-      lastSyncAt: null,
-    },
-    {
-      id: "read-later",
-      title: "Read Later",
-      url: "",
-      siteUrl: null,
-      unread: readLaterCount,
-      lastSyncAt: null,
-    },
-  ];
+
+  const failedCount = syncStatus?.failedFeeds.length ?? 0;
+  const isRunning = syncStatus?.phase === "running" || isSyncing;
 
   return (
     <aside className="sidebar">
@@ -161,6 +158,14 @@ export function Sidebar({
           <div className="section-actions">
             <button
               className="icon-button"
+              title="同步全部"
+              onClick={handleStartSync}
+              disabled={isRunning}
+            >
+              {isRunning ? "..." : "↻"}
+            </button>
+            <button
+              className="icon-button"
               title="添加订阅"
               onClick={() => setShowAddDialog(true)}
             >
@@ -172,7 +177,7 @@ export function Sidebar({
               onClick={handleImportOpml}
               disabled={isImporting}
             >
-              {isImporting ? "..." : String.fromCharCode(8593)}
+              {isImporting ? "..." : "↑"}
             </button>
             <button
               className="icon-button"
@@ -184,6 +189,21 @@ export function Sidebar({
           </div>
         </div>
 
+        {isRunning && syncStatus && (
+          <div className="sync-status-bar">
+            同步中 ({syncStatus.completedFeeds}/{syncStatus.totalFeeds})
+          </div>
+        )}
+
+        {failedCount > 0 && !isRunning && (
+          <div className="sync-failed-bar">
+            <span>{failedCount} 个订阅源同步失败</span>
+            <button className="retry-button" onClick={handleRetryFailed}>
+              重试
+            </button>
+          </div>
+        )}
+
         {(opmlStatus || opmlError) && (
           <div className={opmlError ? "opml-status error" : "opml-status"}>
             {opmlError ?? opmlStatus}
@@ -191,7 +211,7 @@ export function Sidebar({
         )}
 
         <div className="feed-list">
-          {[allFeed, ...smartFeeds, ...feeds].map((feed) => (
+          {[allFeed, ...feeds].map((feed) => (
             <div
               key={feed.id}
               className={
@@ -212,7 +232,7 @@ export function Sidebar({
                 {feed.title}
               </button>
               <span className="feed-right">
-                {!["all", "favorites", "read-later"].includes(feed.id) && (
+                {feed.id !== "all" && (
                   <button
                     className={
                       refreshingFeedId === feed.id
@@ -230,15 +250,6 @@ export function Sidebar({
             </div>
           ))}
         </div>
-        {refreshToast && (
-          <div
-            className={`refresh-toast${
-              refreshToast.type === "error" ? " failed" : ""
-            }`}
-          >
-            {refreshToast.message}
-          </div>
-        )}
       </section>
 
       {showAddDialog && (

@@ -2,24 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Sidebar } from "./components/Sidebar";
 import { ArticleList } from "./components/ArticleList";
-import type { Feed, Article, ReadFilter, UnreadSummary } from "./types";
+import type { Feed, Article, ReadFilter, UnreadSummary, SyncStatus } from "./types";
 import "./App.css";
-
-/* ── Extended Article type with AI-generated fields ── */
-type ArticleWithAI = Article & {
-  summary?: string;
-  translation?: string;
-};
 
 /* ── Mock data (pure frontend dev — Tauri invoke unavailable) ── */
 const MOCK_FEEDS: Feed[] = [];
-const MOCK_ARTICLES: ArticleWithAI[] = [];
+const MOCK_ARTICLES: Article[] = [];
 
 type ReadView = "original" | "translation" | "bilingual";
 
 function App() {
   const [feeds, setFeeds] = useState<Feed[]>([]);
-  const [articles, setArticles] = useState<ArticleWithAI[]>([]);
+  const [articles, setArticles] = useState<Article[]>([]);
   const [selectedFeedId, setSelectedFeedId] = useState("all");
   const [selectedArticleId, setSelectedArticleId] = useState<string | null>(null);
   const [readFilter, setReadFilter] = useState<ReadFilter>("all");
@@ -36,6 +30,29 @@ function App() {
   const [aiError, setAiError] = useState<string | null>(null);
   const [readView, setReadView] = useState<ReadView>("original");
   const [targetLang, setTargetLang] = useState("zh");
+
+  // Sync status
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+
+  const refreshSyncStatus = useCallback(async () => {
+    try {
+      setSyncStatus(await invoke<SyncStatus>("get_sync_status"));
+    } catch {
+      // Sync status unavailable
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSyncStatus();
+  }, [refreshSyncStatus]);
+
+  useEffect(() => {
+    if (syncStatus?.phase !== "running") return;
+    const timer = window.setInterval(() => {
+      void refreshSyncStatus();
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [syncStatus?.phase, refreshSyncStatus]);
 
   const loadData = useCallback(async (feedId = selectedFeedId, filter = readFilter) => {
     try {
@@ -78,7 +95,7 @@ function App() {
     }
   }, []);
 
-  async function handleToggleReadStatus(article: ArticleWithAI) {
+  async function handleToggleReadStatus(article: Article) {
     try {
       setIsUpdatingReadStatus(true);
       const updated = await invoke<Article>("set_article_read_status", {
@@ -210,8 +227,10 @@ function App() {
       <Sidebar
         feeds={feeds}
         selectedFeedId={selectedFeedId}
+        syncStatus={syncStatus}
         onSelectFeed={setSelectedFeedId}
         onFeedsChange={loadData}
+        onSyncStatusChange={refreshSyncStatus}
       />
       <ArticleList
         articles={visibleArticles}

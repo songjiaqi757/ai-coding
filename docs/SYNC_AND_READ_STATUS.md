@@ -28,6 +28,38 @@ update_sync_config(enabled: bool, interval_minutes: i64, retry_limit: i64) -> Re
 
 `get_sync_config()` and `update_sync_config()` persist app-level sync settings in the local `settings` table. This phase stores configuration only; the first UI integration can trigger scheduled syncs while the app is running.
 
+## Person B Article Read Status
+
+New commands for article read/unread management:
+
+```text
+set_article_read_status(article_id: String, is_read: bool) -> Result<Article, String>
+mark_articles_read(feed_id: Option<String>, article_ids: Option<Vec<String>>) -> Result<UnreadSummary, String>
+list_articles(feed_id: Option<String>, read_filter: Option<String>) -> Result<Vec<Article>, String>
+```
+
+`set_article_read_status` toggles a single article between read and unread.
+
+`mark_articles_read` batch-marks articles as read. Priority: `article_ids` > `feed_id` > all articles.
+
+`list_articles` now accepts an optional `read_filter` parameter: `"all"` (default), `"unread"`, or `"read"`.
+
+## Person C Frontend Integration
+
+Sidebar additions:
+- Sync All button triggers `start_sync(None)` and shows progress.
+- Sync status bar shows progress during sync (polls every 2.5s).
+- Failed feeds count with retry button.
+
+Article list additions:
+- Segmented control for all/unread/read filter.
+- Mark All Read button for current feed.
+- Per-article read/unread toggle.
+
+AI features:
+- LLM settings modal (base URL, API key, model name).
+- Article summarization and translation.
+
 ## Data Storage
 
 All sync data remains local SQLite data.
@@ -62,13 +94,17 @@ Automatic sync only requests feed URLs that the user has added or imported. It d
 
 The Saved Articles feed is local-only and is not synced as a remote feed.
 
+LLM features send article content to the user-configured LLM API endpoint only. No data is sent to Anthropic or any other third party unless the user configures it.
+
 ## Manual Acceptance
 
-1. Run `cd app/src-tauri && cargo check`.
-2. Start the app and use the existing single Feed refresh button; it should still refresh articles.
-3. Call `start_sync` with `feedId: null`; all ordinary feeds should be synced in sequence.
-4. Add or keep one invalid Feed URL, then call `start_sync`; valid feeds should continue syncing and the invalid feed should be recorded in `sync_failures`.
-5. Call `get_sync_status` before, during, and after sync; it should return `idle`, `running`, then `success` or `failed` with feed counts.
-6. Call `retry_failed_syncs`; only feeds in `sync_failures` should be retried.
-7. Call `update_sync_config` with a positive interval and non-negative retry limit, then call `get_sync_config`; the saved values should be returned.
-8. Call `update_sync_config` with `interval_minutes <= 0` or `retry_limit < 0`; it should return an error.
+1. Run `cd app && pnpm build` (TypeScript + Vite build).
+2. Run `cd app/src-tauri && cargo check`.
+3. Start the app and use the existing single Feed refresh button; it should still refresh articles.
+4. Click "Sync All" in sidebar; all ordinary feeds should be synced with progress shown.
+5. Add or keep one invalid Feed URL, then sync; valid feeds should continue and failed count should appear.
+6. Click "Retry" on failed feeds bar; only failed feeds should be retried.
+7. Toggle article read/unread status; it should persist after refresh.
+8. Switch between all/unread/read filter; article list should update correctly.
+9. Click "Mark All Read"; current feed's unread count should drop to zero.
+10. Restart the app; sync config and article read states should persist.
