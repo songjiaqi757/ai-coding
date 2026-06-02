@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head>
+    <title>Mercury Live Feed Test</title>
+  </head>
+  <body>
+    <outline text="Live Test" title="Live Test">
+      <outline
+        text="Planet Python"
+        title="Planet Python"
+        type="rss"
+        xmlUrl="https://planetpython.org/rss20.xml"
+        htmlUrl="http://planetpython.org/"
+      />
+      <outline
+        text="xkcd"
+        title="xkcd"
+        type="rss"
+        xmlUrl="https://xkcd.com/atom.xml"
+        htmlUrl="https://xkcd.com/"
+      />
+      <outline
+        text="Daring Fireball JSON Feed"
+        title="Daring Fireball JSON Feed"
+        type="rss"
+        xmlUrl="https://daringfireball.net/feeds/json"
+        htmlUrl="https://daringfireball.net/"
+      />
+    </outline>
+  </body>
+</opml>

@@ -1,32 +1,101 @@
 mod llm_provider;
+pub mod opml;
+pub mod sync;
 
 use llm_provider::LlmConfig;
-use rusqlite::{params, Connection};
+use reqwest::{Client, Url};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use tauri::{AppHandle, Manager};
+use uuid::Uuid;
+
+const CLEANER_VERSION: &str = "node-readability-v4";
+pub(crate) const SAVED_ARTICLES_FEED_ID: &str = "saved";
+const SAVED_ARTICLES_FEED_URL: &str = "mercury://saved-articles";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Feed {
-    id: String,
-    title: String,
-    unread: i64,
+pub struct Feed {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub site_url: Option<String>,
+    pub unread: i64,
+    pub last_sync_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Article {
+pub struct Article {
+    pub id: String,
+    pub feed_id: String,
+    pub title: String,
+    pub url: String,
+    pub author: Option<String>,
+    pub published_at: Option<String>,
+    pub excerpt: String,
+    pub content: String,
+    pub raw_html: Option<String>,
+    pub cleaned_html: Option<String>,
+    pub cleaned_markdown: Option<String>,
+    pub content_fetched_at: Option<String>,
+    pub content_fetch_status: String,
+    pub content_fetch_error: Option<String>,
+    pub final_url: Option<String>,
+    pub summary: Option<String>,
+    pub translation: Option<String>,
+    pub is_read: bool,
+    pub is_favorite: bool,
+    pub read_later: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedUnread {
+    pub feed_id: String,
+    pub feed_title: String,
+    pub unread: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreadSummary {
+    pub total_unread: i64,
+    pub feed_unread: Vec<FeedUnread>,
+}
+
+#[derive(Debug, Serialize)]
+struct Annotation {
     id: String,
-    feed_id: String,
-    title: String,
-    source: String,
-    published_at: String,
-    excerpt: String,
-    content: String,
-    summary: Option<String>,
-    translation: Option<String>,
+    article_id: String,
+    kind: String,
+    selected_text: Option<String>,
+    prefix_text: Option<String>,
+    suffix_text: Option<String>,
+    start_offset: Option<i64>,
+    end_offset: Option<i64>,
+    note_text: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct NodeCleanerInput {
+    html: String,
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeCleanerOutput {
+    title: Option<String>,
+    byline: Option<String>,
+    excerpt: Option<String>,
+    cleaned_html: Option<String>,
+    cleaned_markdown: Option<String>,
 }
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -41,68 +110,15 @@ fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir.join("mercury.db"))
 }
 
-fn open_database(app: &AppHandle) -> Result<Connection, String> {
+pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
     let path = database_path(app)?;
     let conn = Connection::open(path)
         .map_err(|error| format!("Failed to open SQLite database: {error}"))?;
 
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| format!("Failed to enable SQLite foreign keys: {error}"))?;
+
     init_schema(&conn)?;
-    seed_database(&conn)?;
-
-    Ok(conn)
-}
-
-fn init_schema(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS feeds (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            unread INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS articles (
-            id TEXT PRIMARY KEY,
-            feed_id TEXT NOT NULL,
-            title TEXT NOT NULL,
-            source TEXT NOT NULL,
-            published_at TEXT NOT NULL,
-            excerpt TEXT NOT NULL,
-            content TEXT NOT NULL,
-            read_status INTEGER NOT NULL DEFAULT 0,
-            summary TEXT,
-            translation TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(feed_id) REFERENCES feeds(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        ",
-    )
-    .map_err(|error| format!("Failed to initialize database schema: {error}"))?;
-
-    // Migration: add columns to existing databases that lack them
-    let migrations = [
-        "ALTER TABLE articles ADD COLUMN summary TEXT",
-        "ALTER TABLE articles ADD COLUMN translation TEXT",
-    ];
-    for sql in &migrations {
-        let _ = conn.execute(sql, []);
-    }
-
-    Ok(())
-}
-
-fn seed_database(conn: &Connection) -> Result<(), String> {
-    let feed_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds", [], |row| row.get(0))
-        .map_err(|error| format!("Failed to count feeds: {error}"))?;
 
     // LLM default settings — always run so provider config stays in sync
     conn.execute(
@@ -123,86 +139,1282 @@ fn seed_database(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|error| format!("Failed to seed llm_model_name: {error}"))?;
 
-    if feed_count > 0 {
-        return Ok(());
+    Ok(conn)
+}
+
+fn init_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS feeds (
+            id           TEXT PRIMARY KEY,
+            title        TEXT NOT NULL,
+            url          TEXT NOT NULL UNIQUE,
+            site_url     TEXT,
+            unread       INTEGER NOT NULL DEFAULT 0,
+            last_sync_at TEXT,
+            created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS articles (
+            id                   TEXT PRIMARY KEY,
+            feed_id              TEXT NOT NULL,
+            title                TEXT NOT NULL,
+            url                  TEXT NOT NULL,
+            guid                 TEXT,
+            author               TEXT,
+            published_at         TEXT,
+            excerpt              TEXT NOT NULL DEFAULT '',
+            content              TEXT NOT NULL DEFAULT '',
+            raw_html             TEXT,
+            cleaned_html         TEXT,
+            cleaned_markdown     TEXT,
+            cleaner_version      TEXT,
+            content_fetched_at   TEXT,
+            content_fetch_status TEXT NOT NULL DEFAULT 'pending',
+            content_fetch_error  TEXT,
+            final_url            TEXT,
+            read_status          INTEGER NOT NULL DEFAULT 0,
+            summary              TEXT,
+            translation          TEXT,
+            is_favorite          INTEGER NOT NULL DEFAULT 0,
+            read_later           INTEGER NOT NULL DEFAULT 0,
+            created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(feed_id) REFERENCES feeds(id),
+            UNIQUE(feed_id, url)
+        );
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sync_failures (
+            feed_id TEXT PRIMARY KEY,
+            feed_title TEXT NOT NULL,
+            error TEXT NOT NULL,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            failed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(feed_id) REFERENCES feeds(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS annotations (
+            id TEXT PRIMARY KEY,
+            article_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('highlight', 'note')),
+            selected_text TEXT,
+            prefix_text TEXT,
+            suffix_text TEXT,
+            start_offset INTEGER,
+            end_offset INTEGER,
+            note_text TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE
+        );
+        ",
+    )
+    .map_err(|error| format!("Failed to initialize database schema: {error}"))?;
+
+    let migrations = [
+        "ALTER TABLE feeds ADD COLUMN url TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE feeds ADD COLUMN site_url TEXT",
+        "ALTER TABLE feeds ADD COLUMN last_sync_at TEXT",
+        "ALTER TABLE feeds ADD COLUMN created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE feeds ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE articles ADD COLUMN url TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE articles ADD COLUMN guid TEXT",
+        "ALTER TABLE articles ADD COLUMN author TEXT",
+        "ALTER TABLE articles ADD COLUMN raw_html TEXT",
+        "ALTER TABLE articles ADD COLUMN cleaned_html TEXT",
+        "ALTER TABLE articles ADD COLUMN cleaned_markdown TEXT",
+        "ALTER TABLE articles ADD COLUMN cleaner_version TEXT",
+        "ALTER TABLE articles ADD COLUMN content_fetched_at TEXT",
+        "ALTER TABLE articles ADD COLUMN content_fetch_status TEXT NOT NULL DEFAULT 'pending'",
+        "ALTER TABLE articles ADD COLUMN content_fetch_error TEXT",
+        "ALTER TABLE articles ADD COLUMN final_url TEXT",
+        "ALTER TABLE articles ADD COLUMN summary TEXT",
+        "ALTER TABLE articles ADD COLUMN translation TEXT",
+        "ALTER TABLE articles ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE articles ADD COLUMN read_later INTEGER NOT NULL DEFAULT 0",
+    ];
+
+    for sql in &migrations {
+        let _ = conn.execute(sql, []);
     }
 
-    conn.execute(
-        "INSERT INTO feeds (id, title, unread) VALUES (?1, ?2, ?3)",
-        params!["tech", "Technology", 3],
+    Ok(())
+}
+
+pub(crate) fn find_feed_by_url(conn: &Connection, url: &str) -> Result<Option<Feed>, String> {
+    conn.query_row(
+        "SELECT f.id, f.title, COALESCE(f.url, ''), f.site_url, f.last_sync_at,
+                COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread
+         FROM feeds f
+         LEFT JOIN articles a ON a.feed_id = f.id
+         WHERE f.url = ?1
+         GROUP BY f.id, f.title, f.url, f.site_url, f.last_sync_at
+         LIMIT 1",
+        params![url],
+        |row| {
+            Ok(Feed {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                url: row.get(2)?,
+                site_url: row.get(3)?,
+                last_sync_at: row.get(4)?,
+                unread: row.get(5)?,
+            })
+        },
     )
-    .map_err(|error| format!("Failed to seed Technology feed: {error}"))?;
+    .optional()
+    .map_err(|error| format!("Failed to query feed by URL: {error}"))
+}
+
+pub async fn import_feed(app: &AppHandle, url: &str) -> Result<Feed, String> {
+    let response = reqwest::get(url)
+        .await
+        .map_err(|error| format!("Failed to request feed URL: {error}"))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Failed to read feed response: {error}"))?;
+    let parsed = feed_rs::parser::parse(bytes.as_ref())
+        .map_err(|error| format!("Failed to parse RSS/Atom/JSON Feed: {error}"))?;
+
+    let title = parsed
+        .title
+        .as_ref()
+        .map(|title| title.content.clone())
+        .unwrap_or_else(|| "Untitled feed".to_string());
+    let site_url = select_feed_site_url(&parsed, None, url);
+    let conn = open_database(app)?;
+
+    if let Some(existing_feed) = find_feed_by_url(&conn, url)? {
+        save_articles(&conn, &existing_feed.id, parsed.entries)?;
+        return find_feed_by_url(&conn, url)?
+            .ok_or_else(|| "Feed disappeared after saving articles".to_string());
+    }
+
+    let feed_id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO feeds (id, title, url, site_url, last_sync_at)
+         VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
+        params![feed_id, title, url, site_url],
+    )
+    .map_err(|error| format!("Failed to save feed: {error}"))?;
+
+    save_articles(&conn, &feed_id, parsed.entries)?;
+
+    let unread: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE feed_id = ?1 AND read_status = 0",
+            params![feed_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Failed to query unread count: {error}"))?;
+    let last_sync_at = conn
+        .query_row(
+            "SELECT last_sync_at FROM feeds WHERE id = ?1",
+            params![feed_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Failed to query sync time: {error}"))?;
+
+    Ok(Feed {
+        id: feed_id,
+        title,
+        url: url.to_string(),
+        site_url,
+        unread,
+        last_sync_at,
+    })
+}
+
+pub(crate) fn select_feed_site_url(
+    feed: &feed_rs::model::Feed,
+    opml_site_url: Option<&str>,
+    feed_url: &str,
+) -> Option<String> {
+    feed.links
+        .iter()
+        .find_map(|link| {
+            let rel = link.rel.as_deref().unwrap_or("alternate");
+            rel.eq_ignore_ascii_case("alternate")
+                .then(|| clean_site_url(Some(&link.href), feed_url))
+                .flatten()
+        })
+        .or_else(|| {
+            feed.links.iter().find_map(|link| {
+                let rel = link.rel.as_deref().unwrap_or("alternate");
+                (!rel.eq_ignore_ascii_case("self"))
+                    .then(|| clean_site_url(Some(&link.href), feed_url))
+                    .flatten()
+            })
+        })
+        .or_else(|| clean_site_url(opml_site_url, feed_url))
+        .or_else(|| guess_site_url_from_feed_url(feed_url))
+}
+
+pub(crate) fn clean_site_url(candidate: Option<&str>, feed_url: &str) -> Option<String> {
+    let candidate = candidate.map(str::trim).filter(|value| !value.is_empty())?;
+    if urls_match(candidate, feed_url) || looks_like_feed_url(candidate) {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+pub(crate) fn guess_site_url_from_feed_url(feed_url: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(feed_url).ok()?;
+    let had_query = url.query().is_some();
+    url.set_query(None);
+    url.set_fragment(None);
+
+    let path = url.path().trim_end_matches('/').to_string();
+    let lower_path = path.to_ascii_lowercase();
+    let new_path = if lower_path.ends_with("/feed") {
+        &path[..path.len() - "/feed".len()]
+    } else if lower_path.ends_with("/rss2") {
+        &path[..path.len() - "/rss2".len()]
+    } else if lower_path.ends_with("/atom") {
+        &path[..path.len() - "/atom".len()]
+    } else if lower_path.ends_with("/rss") {
+        &path[..path.len() - "/rss".len()]
+    } else if lower_path.ends_with("/rss/index.xml") {
+        &path[..path.len() - "/rss/index.xml".len()]
+    } else if lower_path.ends_with("/index.xml") {
+        &path[..path.len() - "/index.xml".len()]
+    } else if had_query {
+        path.as_str()
+    } else {
+        return None;
+    };
+
+    url.set_path(if new_path.is_empty() { "/" } else { new_path });
+    Some(url.to_string())
+}
+
+fn urls_match(left: &str, right: &str) -> bool {
+    match (reqwest::Url::parse(left), reqwest::Url::parse(right)) {
+        (Ok(mut left), Ok(mut right)) => {
+            left.set_fragment(None);
+            right.set_fragment(None);
+            left == right
+        }
+        _ => left.trim_end_matches('/') == right.trim_end_matches('/'),
+    }
+}
+
+fn looks_like_feed_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+
+    let path = parsed.path().trim_end_matches('/').to_ascii_lowercase();
+    let has_feed_query = parsed
+        .query_pairs()
+        .any(|(key, value)| key.eq_ignore_ascii_case("feed") || value.eq_ignore_ascii_case("feed"));
+
+    has_feed_query
+        || path.ends_with("/feed")
+        || path.ends_with("/rss")
+        || path.ends_with("/rss2")
+        || path.ends_with("/atom")
+        || path.ends_with(".rss")
+        || path.ends_with(".xml")
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| format!("Failed to inspect table '{table}': {error}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("Failed to query columns for '{table}': {error}"))?;
+
+    for row in rows {
+        let existing = row.map_err(|error| format!("Failed to read column name: {error}"))?;
+        if existing == column {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+pub fn save_articles(
+    conn: &Connection,
+    feed_id: &str,
+    entries: Vec<feed_rs::model::Entry>,
+) -> Result<usize, String> {
+    let mut saved = 0;
+    let has_legacy_source_column = table_has_column(conn, "articles", "source")?;
+
+    for entry in entries {
+        let url = match select_article_url(&entry) {
+            Some(url) => url,
+            None => continue,
+        };
+
+        let article_id = Uuid::new_v4().to_string();
+        let guid = Some(entry.id.clone());
+        let title = entry
+            .title
+            .map(|title| title.content)
+            .unwrap_or_else(|| "Untitled".to_string());
+        let author = entry.authors.first().map(|author| author.name.clone());
+        let published_at = entry.published.map(|date| date.to_rfc3339());
+        let published_at_for_legacy = published_at.clone().unwrap_or_default();
+        let excerpt = entry
+            .summary
+            .map(|summary| summary.content)
+            .or_else(|| {
+                entry
+                    .content
+                    .as_ref()
+                    .and_then(|content| content.body.as_ref())
+                    .map(|body| body.chars().take(200).collect())
+            })
+            .unwrap_or_default();
+        let content = entry.content.and_then(|content| content.body).unwrap_or_default();
+
+        let inserted = if has_legacy_source_column {
+            conn.execute(
+                "INSERT OR IGNORE INTO articles
+                    (id, feed_id, title, source, published_at, excerpt, content, url, guid, author)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    article_id,
+                    feed_id,
+                    title,
+                    url,
+                    published_at_for_legacy,
+                    excerpt,
+                    content,
+                    url,
+                    guid,
+                    author
+                ],
+            )
+        } else {
+            conn.execute(
+                "INSERT OR IGNORE INTO articles
+                    (id, feed_id, title, url, guid, author, published_at, excerpt, content)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    article_id,
+                    feed_id,
+                    title,
+                    url,
+                    guid,
+                    author,
+                    published_at,
+                    excerpt,
+                    content
+                ],
+            )
+        }
+        .map_err(|error| format!("Failed to save article: {error}"))?;
+
+        if inserted == 1 {
+            saved += 1;
+        }
+    }
+
+    Ok(saved)
+}
+
+fn select_article_url(entry: &feed_rs::model::Entry) -> Option<String> {
+    entry
+        .links
+        .iter()
+        .find(|link| {
+            link.rel
+                .as_deref()
+                .unwrap_or("alternate")
+                .eq_ignore_ascii_case("alternate")
+        })
+        .or_else(|| entry.links.first())
+        .map(|link| link.href.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            let guid = entry.id.trim();
+            reqwest::Url::parse(guid).ok().map(|_| guid.to_string())
+        })
+}
+
+fn article_from_row(row: &Row<'_>) -> rusqlite::Result<Article> {
+    let read_status: i64 = row.get(8)?;
+    Ok(Article {
+        id: row.get(0)?,
+        feed_id: row.get(1)?,
+        title: row.get(2)?,
+        url: row.get(3)?,
+        author: row.get(4)?,
+        published_at: row.get(5)?,
+        excerpt: row.get(6)?,
+        content: row.get(7)?,
+        is_read: read_status == 1,
+        raw_html: row.get(9)?,
+        cleaned_html: row.get(10)?,
+        cleaned_markdown: row.get(11)?,
+        content_fetched_at: row.get(12)?,
+        content_fetch_status: row.get(13)?,
+        content_fetch_error: row.get(14)?,
+        final_url: row.get(15)?,
+        summary: row.get(16)?,
+        translation: row.get(17)?,
+        is_favorite: row.get(18)?,
+        read_later: row.get(19)?,
+    })
+}
+
+fn safe_fetchable_url(url: &str) -> bool {
+    let normalized = url.trim().to_ascii_lowercase();
+    normalized.starts_with("http://") || normalized.starts_with("https://")
+}
+
+fn normalize_fetch_url(url: &str) -> Result<String, String> {
+    let trimmed = url.trim();
+    if !safe_fetchable_url(trimmed) {
+        return Err("Article URL must start with http:// or https://".to_string());
+    }
+
+    Url::parse(trimmed)
+        .map(|parsed| parsed.to_string())
+        .map_err(|error| format!("Invalid article URL: {error}"))
+}
+
+fn source_from_url(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .unwrap_or_else(|| "Web Article".to_string())
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|inner| {
+        let trimmed = inner.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn fallback_html_from_article(article: &Article) -> String {
+    let mut blocks = vec![format!("<h1>{}</h1>", escape_html(&article.title))];
+
+    if !article.excerpt.trim().is_empty() {
+        blocks.push(format!("<p>{}</p>", escape_html(article.excerpt.trim())));
+    }
+
+    if !article.content.trim().is_empty() {
+        for paragraph in article.content.split("\n\n") {
+            let trimmed = paragraph.trim();
+            if !trimmed.is_empty() {
+                blocks.push(format!("<p>{}</p>", escape_html(trimmed)));
+            }
+        }
+    }
+
+    format!("<article>{}</article>", blocks.join("\n"))
+}
+
+fn node_script_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("scripts")
+        .join("article-cleaner.mjs")
+}
+
+async fn run_node_cleaner(html: String, url: Option<String>) -> Result<NodeCleanerOutput, String> {
+    let script_path = node_script_path();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let payload = serde_json::to_vec(&NodeCleanerInput { html, url })
+            .map_err(|error| format!("Failed to serialize cleaner input: {error}"))?;
+
+        let mut child = Command::new("node")
+            .arg(script_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Failed to start Node article cleaner: {error}"))?;
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Failed to open stdin for Node article cleaner".to_string())?;
+        stdin
+            .write_all(&payload)
+            .map_err(|error| format!("Failed to send HTML to Node article cleaner: {error}"))?;
+        drop(stdin);
+
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("Failed to wait for Node article cleaner: {error}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                "Node article cleaner exited with an unknown error".to_string()
+            } else {
+                format!("Node article cleaner failed: {stderr}")
+            });
+        }
+
+        serde_json::from_slice::<NodeCleanerOutput>(&output.stdout)
+            .map_err(|error| format!("Failed to decode Node cleaner output: {error}"))
+    })
+    .await
+    .map_err(|error| format!("Node cleaner task failed: {error}"))?
+}
+
+async fn fetch_html(url: &str) -> Result<String, String> {
+    let client = Client::builder()
+        .build()
+        .map_err(|error| format!("Failed to create HTTP client: {error}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("Failed to fetch article HTML: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to fetch article HTML: HTTP {}",
+            response.status()
+        ));
+    }
+
+    response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read article HTML: {error}"))
+}
+
+fn load_article_by_id(conn: &Connection, article_id: &str) -> Result<Article, String> {
+    conn.query_row(
+        "SELECT id, feed_id, title, url, author, published_at, excerpt, content,
+                read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                  content_fetch_status, content_fetch_error, final_url, summary, translation,
+                  is_favorite, read_later
+         FROM articles
+         WHERE id = ?1",
+        params![article_id],
+        article_from_row,
+    )
+    .optional()
+    .map_err(|error| format!("Failed to query article: {error}"))?
+    .ok_or_else(|| format!("Article {article_id} was not found"))
+}
+
+fn save_cleaned_article(
+    conn: &Connection,
+    article_id: &str,
+    raw_html: Option<&str>,
+    final_url: Option<&str>,
+    cleaned: NodeCleanerOutput,
+) -> Result<(), String> {
+    let cleaned_html = normalize_optional_text(cleaned.cleaned_html)
+        .ok_or_else(|| "Article cleaner returned empty cleaned_html".to_string())?;
+    let cleaned_markdown = normalize_optional_text(cleaned.cleaned_markdown)
+        .ok_or_else(|| "Article cleaner returned empty cleaned_markdown".to_string())?;
+    let title = normalize_optional_text(cleaned.title);
+    let author = normalize_optional_text(cleaned.byline);
+    let excerpt = normalize_optional_text(cleaned.excerpt);
 
     conn.execute(
-        "INSERT INTO feeds (id, title, unread) VALUES (?1, ?2, ?3)",
-        params!["design", "Design", 2],
-    )
-    .map_err(|error| format!("Failed to seed Design feed: {error}"))?;
-
-    conn.execute(
-        "INSERT INTO feeds (id, title, unread) VALUES (?1, ?2, ?3)",
-        params!["ai", "AI Research", 2],
-    )
-    .map_err(|error| format!("Failed to seed AI feed: {error}"))?;
-
-    conn.execute(
-        "
-        INSERT INTO articles
-            (id, feed_id, title, source, published_at, excerpt, content)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ",
+        "UPDATE articles
+         SET raw_html = COALESCE(?2, raw_html),
+             cleaned_html = ?3,
+             cleaned_markdown = ?4,
+             title = COALESCE(?5, title),
+             author = COALESCE(?6, author),
+             excerpt = COALESCE(?7, excerpt),
+             cleaner_version = ?8,
+             content_fetched_at = CURRENT_TIMESTAMP,
+             content_fetch_status = 'cleaned',
+             content_fetch_error = NULL,
+             final_url = COALESCE(?9, final_url),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?1",
         params![
-            "a1",
-            "ai",
-            "Local-first AI apps are becoming practical",
-            "AI Weekly",
-            "Today",
-            "A new wave of AI tools keeps data local while allowing users to connect their own model providers.",
-            "Local-first AI applications combine private local storage with optional model providers. This architecture allows users to keep their reading data, summaries, translations, and preferences on their own device. When an AI feature is triggered, the app can call a user-configured local or remote model provider without requiring a central server."
+            article_id,
+            raw_html,
+            cleaned_html,
+            cleaned_markdown,
+            title,
+            author,
+            excerpt,
+            CLEANER_VERSION,
+            final_url
         ],
     )
-    .map_err(|error| format!("Failed to seed article a1: {error}"))?;
-
-    conn.execute(
-        "
-        INSERT INTO articles
-            (id, feed_id, title, source, published_at, excerpt, content)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ",
-        params![
-            "a2",
-            "tech",
-            "Why desktop apps still matter",
-            "Software Notes",
-            "Yesterday",
-            "For tools that manage personal data, a desktop app can offer better privacy and reliability than a cloud-only web app.",
-            "Desktop applications remain useful for privacy-sensitive workflows. They can run without accounts, store data locally, and continue working even when network services are unavailable. For a reader application, this means feeds, articles, cleaned content, summaries, and translations can remain under the user's control."
-        ],
-    )
-    .map_err(|error| format!("Failed to seed article a2: {error}"))?;
-
-    conn.execute(
-        "
-        INSERT INTO articles
-            (id, feed_id, title, source, published_at, excerpt, content)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ",
-        params![
-            "a3",
-            "design",
-            "Designing a calm reading interface",
-            "Interface Lab",
-            "May 21",
-            "A good reader should reduce visual noise and make the article itself the primary focus.",
-            "Reader interfaces benefit from simple layouts, consistent spacing, readable typography, and clear hierarchy. A three-column layout can separate navigation, article selection, and reading without overwhelming the user."
-        ],
-    )
-    .map_err(|error| format!("Failed to seed article a3: {error}"))?;
+    .map_err(|error| format!("Failed to save cleaned article: {error}"))?;
 
     Ok(())
+}
+
+fn ensure_saved_articles_feed(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO feeds (id, title, url, site_url, unread)
+         VALUES (?1, 'Saved Articles', ?2, NULL, 0)
+         ON CONFLICT(id) DO NOTHING",
+        params![SAVED_ARTICLES_FEED_ID, SAVED_ARTICLES_FEED_URL],
+    )
+    .map_err(|error| format!("Failed to ensure Saved Articles feed: {error}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn add_feed(app: AppHandle, url: String) -> Result<Feed, String> {
+    import_feed(&app, &url).await
+}
+
+#[tauri::command]
+async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, String> {
+    if feed_id == SAVED_ARTICLES_FEED_ID {
+        let conn = open_database(&app)?;
+        return list_articles_by_feed(&conn, Some(&feed_id), None);
+    }
+
+    sync::sync_one_feed(&app, &feed_id).await?;
+    let conn = open_database(&app)?;
+    list_articles_by_feed(&conn, Some(&feed_id), None)
+}
+
+#[tauri::command]
+fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
+    let conn = open_database(&app)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT f.id, f.title, COALESCE(f.url, ''), f.site_url, f.last_sync_at,
+                    COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread
+             FROM feeds f
+             LEFT JOIN articles a ON a.feed_id = f.id
+             GROUP BY f.id
+             ORDER BY f.title ASC",
+        )
+        .map_err(|error| format!("Failed to prepare feed query: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(Feed {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                url: row.get(2)?,
+                site_url: row.get(3)?,
+                last_sync_at: row.get(4)?,
+                unread: row.get(5)?,
+            })
+        })
+        .map_err(|error| format!("Failed to query feeds: {error}"))?;
+
+    let mut feeds = Vec::new();
+    for row in rows {
+        feeds.push(row.map_err(|error| format!("Failed to read feed row: {error}"))?);
+    }
+    Ok(feeds)
+}
+
+#[tauri::command]
+fn list_articles(app: AppHandle, feed_id: Option<String>, read_filter: Option<String>) -> Result<Vec<Article>, String> {
+    let conn = open_database(&app)?;
+    list_articles_by_feed(&conn, feed_id.as_deref(), read_filter.as_deref())
+}
+
+fn read_filter_sql(read_filter: Option<&str>) -> Result<&'static str, String> {
+    match read_filter.unwrap_or("all") {
+        "all" => Ok(""),
+        "unread" => Ok(" AND read_status = 0"),
+        "read" => Ok(" AND read_status = 1"),
+        other => Err(format!("Unsupported read filter: {other}")),
+    }
+}
+
+fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>, read_filter: Option<&str>) -> Result<Vec<Article>, String> {
+    let filter_sql = read_filter_sql(read_filter)?;
+    let sql = match feed_id {
+        Some(_) => {
+            format!(
+                "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
+                        read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                         content_fetch_status, content_fetch_error, final_url, summary, translation,
+                         is_favorite, read_later
+                 FROM articles
+                 WHERE feed_id = ?1{filter_sql}
+                 ORDER BY published_at DESC, created_at DESC"
+            )
+        }
+        None => {
+            format!(
+                "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
+                        read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                         content_fetch_status, content_fetch_error, final_url, summary, translation,
+                         is_favorite, read_later
+                 FROM articles
+                 WHERE 1 = 1{filter_sql}
+                 ORDER BY published_at DESC, created_at DESC"
+            )
+        }
+    };
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|error| format!("Failed to prepare article query: {error}"))?;
+    let mut result = Vec::new();
+
+    match feed_id {
+        Some(feed_id) => {
+            let rows = stmt
+                .query_map(params![feed_id], article_from_row)
+                .map_err(|error| format!("Failed to query articles: {error}"))?;
+            for row in rows {
+                result.push(row.map_err(|error| format!("Failed to read article row: {error}"))?);
+            }
+        }
+        None => {
+            let rows = stmt
+                .query_map([], article_from_row)
+                .map_err(|error| format!("Failed to query articles: {error}"))?;
+            for row in rows {
+                result.push(row.map_err(|error| format!("Failed to read article row: {error}"))?);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+fn get_article(app: AppHandle, article_id: String) -> Result<Article, String> {
+    let conn = open_database(&app)?;
+    load_article_by_id(&conn, &article_id)
+}
+
+fn annotation_from_row(row: &Row<'_>) -> rusqlite::Result<Annotation> {
+    Ok(Annotation {
+        id: row.get(0)?,
+        article_id: row.get(1)?,
+        kind: row.get(2)?,
+        selected_text: row.get(3)?,
+        prefix_text: row.get(4)?,
+        suffix_text: row.get(5)?,
+        start_offset: row.get(6)?,
+        end_offset: row.get(7)?,
+        note_text: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+fn load_annotation_by_id(conn: &Connection, annotation_id: &str) -> Result<Annotation, String> {
+    conn.query_row(
+        "SELECT id, article_id, kind, selected_text, prefix_text, suffix_text,
+                start_offset, end_offset, note_text, created_at, updated_at
+         FROM annotations
+         WHERE id = ?1",
+        [annotation_id],
+        annotation_from_row,
+    )
+    .optional()
+    .map_err(|error| format!("Failed to query annotation: {error}"))?
+    .ok_or_else(|| format!("Annotation {annotation_id} was not found"))
+}
+
+#[tauri::command]
+fn set_article_favorite(
+    app: AppHandle,
+    article_id: String,
+    is_favorite: bool,
+) -> Result<Article, String> {
+    let conn = open_database(&app)?;
+    let changed = conn
+        .execute(
+            "UPDATE articles SET is_favorite = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![article_id, is_favorite],
+        )
+        .map_err(|error| format!("Failed to update favorite state: {error}"))?;
+    if changed == 0 {
+        return Err(format!("Article {article_id} was not found"));
+    }
+    load_article_by_id(&conn, &article_id)
+}
+
+#[tauri::command]
+fn set_article_read_later(
+    app: AppHandle,
+    article_id: String,
+    read_later: bool,
+) -> Result<Article, String> {
+    let conn = open_database(&app)?;
+    let changed = conn
+        .execute(
+            "UPDATE articles SET read_later = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![article_id, read_later],
+        )
+        .map_err(|error| format!("Failed to update read later state: {error}"))?;
+    if changed == 0 {
+        return Err(format!("Article {article_id} was not found"));
+    }
+    load_article_by_id(&conn, &article_id)
+}
+
+#[tauri::command]
+fn list_annotations(app: AppHandle, article_id: String) -> Result<Vec<Annotation>, String> {
+    let conn = open_database(&app)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, article_id, kind, selected_text, prefix_text, suffix_text,
+                    start_offset, end_offset, note_text, created_at, updated_at
+             FROM annotations
+             WHERE article_id = ?1
+             ORDER BY created_at ASC",
+        )
+        .map_err(|error| format!("Failed to prepare annotations query: {error}"))?;
+    let rows = stmt
+        .query_map([article_id], annotation_from_row)
+        .map_err(|error| format!("Failed to query annotations: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Failed to read annotation row: {error}"))
+}
+
+#[tauri::command]
+fn create_annotation(
+    app: AppHandle,
+    article_id: String,
+    kind: String,
+    selected_text: Option<String>,
+    prefix_text: Option<String>,
+    suffix_text: Option<String>,
+    start_offset: Option<i64>,
+    end_offset: Option<i64>,
+    note_text: Option<String>,
+) -> Result<Annotation, String> {
+    if kind != "highlight" && kind != "note" {
+        return Err("Annotation kind must be highlight or note".to_string());
+    }
+    if kind == "highlight" && selected_text.as_ref().is_none_or(|value| value.trim().is_empty()) {
+        return Err("Highlight selected text cannot be empty".to_string());
+    }
+    if kind == "note" && note_text.as_ref().is_none_or(|value| value.trim().is_empty()) {
+        return Err("Note text cannot be empty".to_string());
+    }
+
+    let conn = open_database(&app)?;
+    load_article_by_id(&conn, &article_id)?;
+    let annotation_id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO annotations (
+            id, article_id, kind, selected_text, prefix_text, suffix_text,
+            start_offset, end_offset, note_text
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            annotation_id,
+            article_id,
+            kind,
+            normalize_optional_text(selected_text),
+            normalize_optional_text(prefix_text),
+            normalize_optional_text(suffix_text),
+            start_offset,
+            end_offset,
+            normalize_optional_text(note_text)
+        ],
+    )
+    .map_err(|error| format!("Failed to create annotation: {error}"))?;
+    load_annotation_by_id(&conn, &annotation_id)
+}
+
+#[tauri::command]
+fn update_annotation(
+    app: AppHandle,
+    annotation_id: String,
+    note_text: Option<String>,
+) -> Result<Annotation, String> {
+    let conn = open_database(&app)?;
+    let changed = conn
+        .execute(
+            "UPDATE annotations SET note_text = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![annotation_id, normalize_optional_text(note_text)],
+        )
+        .map_err(|error| format!("Failed to update annotation: {error}"))?;
+    if changed == 0 {
+        return Err(format!("Annotation {annotation_id} was not found"));
+    }
+    load_annotation_by_id(&conn, &annotation_id)
+}
+
+#[tauri::command]
+fn delete_annotation(app: AppHandle, annotation_id: String) -> Result<(), String> {
+    let conn = open_database(&app)?;
+    let changed = conn
+        .execute("DELETE FROM annotations WHERE id = ?1", [annotation_id.clone()])
+        .map_err(|error| format!("Failed to delete annotation: {error}"))?;
+    if changed == 0 {
+        return Err(format!("Annotation {annotation_id} was not found"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn search_articles(
+    app: AppHandle,
+    query: String,
+    feed_id: Option<String>,
+) -> Result<Vec<Article>, String> {
+    let conn = open_database(&app)?;
+    let trimmed_query = query.trim();
+    if trimmed_query.is_empty() {
+        return list_articles_by_feed(&conn, feed_id.as_deref(), None);
+    }
+
+    let pattern = format!("%{trimmed_query}%");
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
+                    read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
+                    content_fetch_status, content_fetch_error, final_url, summary, translation,
+                    is_favorite, read_later
+             FROM articles
+             WHERE (?1 IS NULL OR ?1 = '' OR feed_id = ?1)
+               AND (
+                 title LIKE ?2 COLLATE NOCASE
+                 OR COALESCE(author, '') LIKE ?2 COLLATE NOCASE
+                 OR COALESCE(excerpt, '') LIKE ?2 COLLATE NOCASE
+                 OR COALESCE(content, '') LIKE ?2 COLLATE NOCASE
+                 OR COALESCE(cleaned_html, '') LIKE ?2 COLLATE NOCASE
+                 OR COALESCE(cleaned_markdown, '') LIKE ?2 COLLATE NOCASE
+                 OR EXISTS (
+                     SELECT 1 FROM annotations
+                     WHERE annotations.article_id = articles.id
+                       AND (
+                         COALESCE(annotations.selected_text, '') LIKE ?2 COLLATE NOCASE
+                         OR COALESCE(annotations.note_text, '') LIKE ?2 COLLATE NOCASE
+                       )
+                 )
+               )
+             ORDER BY published_at DESC, created_at DESC",
+        )
+        .map_err(|error| format!("Failed to prepare article search: {error}"))?;
+    let rows = stmt
+        .query_map(params![feed_id.as_deref(), pattern], article_from_row)
+        .map_err(|error| format!("Failed to search articles: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Failed to read search result: {error}"))
+}
+
+#[tauri::command]
+async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, String> {
+    let article = {
+        let conn = open_database(&app)?;
+        load_article_by_id(&conn, &article_id)?
+    };
+
+    if article
+        .cleaned_markdown
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(article);
+    }
+
+    let (html_for_cleaning, raw_html_to_store, final_url) = if let Some(raw_html) =
+        article.raw_html.as_ref().filter(|value| !value.trim().is_empty())
+    {
+        (raw_html.clone(), None, article.final_url.clone())
+    } else if safe_fetchable_url(&article.url) {
+        match fetch_html(&article.url).await {
+            Ok(fetched_html) => (fetched_html.clone(), Some(fetched_html), Some(article.url.clone())),
+            Err(_) => {
+                let fallback_html = fallback_html_from_article(&article);
+                (fallback_html, None, article.final_url.clone())
+            }
+        }
+    } else {
+        let fallback_html = fallback_html_from_article(&article);
+        (fallback_html, None, article.final_url.clone())
+    };
+
+    let cleaned = run_node_cleaner(html_for_cleaning, Some(article.url.clone())).await?;
+    let conn = open_database(&app)?;
+    save_cleaned_article(
+        &conn,
+        &article_id,
+        raw_html_to_store.as_deref(),
+        final_url.as_deref(),
+        cleaned,
+    )?;
+
+    load_article_by_id(&conn, &article_id)
+}
+
+#[tauri::command]
+async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article, String> {
+    let normalized_url = normalize_fetch_url(&url)?;
+    let raw_html = fetch_html(&normalized_url).await?;
+    let cleaned = run_node_cleaner(raw_html.clone(), Some(normalized_url.clone())).await?;
+    let cleaned_html = normalize_optional_text(cleaned.cleaned_html)
+        .ok_or_else(|| "Article cleaner returned empty cleaned_html".to_string())?;
+    let cleaned_markdown = normalize_optional_text(cleaned.cleaned_markdown)
+        .ok_or_else(|| "Article cleaner returned empty cleaned_markdown".to_string())?;
+    let title = normalize_optional_text(cleaned.title).unwrap_or_else(|| normalized_url.clone());
+    let author = normalize_optional_text(cleaned.byline);
+    let excerpt = normalize_optional_text(cleaned.excerpt).unwrap_or_default();
+
+    let conn = open_database(&app)?;
+    ensure_saved_articles_feed(&conn)?;
+    let source = source_from_url(&normalized_url);
+    let existing_article_id = conn
+        .query_row(
+            "SELECT id FROM articles WHERE feed_id = ?1 AND url = ?2",
+            params![SAVED_ARTICLES_FEED_ID, &normalized_url],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("Failed to check existing fetched article: {error}"))?;
+
+    let saved_id = if let Some(article_id) = existing_article_id {
+        if table_has_column(&conn, "articles", "source")? {
+            conn.execute(
+                "UPDATE articles
+                 SET title = ?2,
+                     source = ?3,
+                     author = ?4,
+                     excerpt = ?5,
+                     content = ?6,
+                     raw_html = ?7,
+                     cleaned_html = ?8,
+                     cleaned_markdown = ?9,
+                     cleaner_version = ?10,
+                     content_fetched_at = CURRENT_TIMESTAMP,
+                     content_fetch_status = 'cleaned',
+                     content_fetch_error = NULL,
+                     final_url = ?11,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                params![
+                    article_id,
+                    title,
+                    source,
+                    author,
+                    excerpt,
+                    excerpt,
+                    raw_html,
+                    cleaned_html,
+                    cleaned_markdown,
+                    CLEANER_VERSION,
+                    normalized_url
+                ],
+            )
+        } else {
+            conn.execute(
+                "UPDATE articles
+                 SET title = ?2,
+                     author = ?3,
+                     excerpt = ?4,
+                     content = ?5,
+                     raw_html = ?6,
+                     cleaned_html = ?7,
+                     cleaned_markdown = ?8,
+                     cleaner_version = ?9,
+                     content_fetched_at = CURRENT_TIMESTAMP,
+                     content_fetch_status = 'cleaned',
+                     content_fetch_error = NULL,
+                     final_url = ?10,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                params![
+                    article_id,
+                    title,
+                    author,
+                    excerpt,
+                    excerpt,
+                    raw_html,
+                    cleaned_html,
+                    cleaned_markdown,
+                    CLEANER_VERSION,
+                    normalized_url
+                ],
+            )
+        }
+        .map_err(|error| format!("Failed to update fetched article: {error}"))?;
+        article_id
+    } else {
+        let article_id = Uuid::new_v4().to_string();
+        if table_has_column(&conn, "articles", "source")? {
+            conn.execute(
+                "INSERT INTO articles (
+                    id, feed_id, title, source, url, author, published_at, excerpt, content,
+                    raw_html, cleaned_html, cleaned_markdown, cleaner_version,
+                    content_fetched_at, content_fetch_status, content_fetch_error, final_url
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Fetched article', ?7, ?8,
+                         ?9, ?10, ?11, ?12, CURRENT_TIMESTAMP, 'cleaned', NULL, ?5)",
+                params![
+                    article_id,
+                    SAVED_ARTICLES_FEED_ID,
+                    title,
+                    source,
+                    normalized_url,
+                    author,
+                    excerpt,
+                    excerpt,
+                    raw_html,
+                    cleaned_html,
+                    cleaned_markdown,
+                    CLEANER_VERSION
+                ],
+            )
+        } else {
+            conn.execute(
+                "INSERT INTO articles (
+                    id, feed_id, title, url, author, published_at, excerpt, content,
+                    raw_html, cleaned_html, cleaned_markdown, cleaner_version,
+                    content_fetched_at, content_fetch_status, content_fetch_error, final_url
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11,
+                         CURRENT_TIMESTAMP, 'cleaned', NULL, ?4)",
+                params![
+                    article_id,
+                    SAVED_ARTICLES_FEED_ID,
+                    title,
+                    normalized_url,
+                    author,
+                    excerpt,
+                    excerpt,
+                    raw_html,
+                    cleaned_html,
+                    cleaned_markdown,
+                    CLEANER_VERSION
+                ],
+            )
+        }
+        .map_err(|error| format!("Failed to save fetched article: {error}"))?;
+        article_id
+    };
+
+    load_article_by_id(&conn, &saved_id)
+}
+
+fn load_unread_summary(conn: &Connection) -> Result<UnreadSummary, String> {
+    let total_unread: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE read_status = 0",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to query total unread: {e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT f.id, f.title, COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread
+             FROM feeds f
+             LEFT JOIN articles a ON a.feed_id = f.id
+             GROUP BY f.id
+             ORDER BY f.title ASC",
+        )
+        .map_err(|e| format!("Failed to prepare unread query: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(FeedUnread {
+                feed_id: row.get(0)?,
+                feed_title: row.get(1)?,
+                unread: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query unread counts: {e}"))?;
+
+    let mut feed_unread = Vec::new();
+    for row in rows {
+        feed_unread.push(row.map_err(|e| format!("Failed to read unread row: {e}"))?);
+    }
+
+    Ok(UnreadSummary {
+        total_unread,
+        feed_unread,
+    })
+}
+
+#[tauri::command]
+fn set_article_read_status(
+    app: AppHandle,
+    article_id: String,
+    is_read: bool,
+) -> Result<Article, String> {
+    let conn = open_database(&app)?;
+    let read_status = if is_read { 1 } else { 0 };
+    let changed = conn
+        .execute(
+            "UPDATE articles
+             SET read_status = ?2, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1",
+            params![article_id, read_status],
+        )
+        .map_err(|e| format!("Failed to update read status: {e}"))?;
+
+    if changed == 0 {
+        return Err(format!("Article {article_id} was not found"));
+    }
+
+    load_article_by_id(&conn, &article_id)
+}
+
+#[tauri::command]
+fn mark_articles_read(
+    app: AppHandle,
+    feed_id: Option<String>,
+    article_ids: Option<Vec<String>>,
+) -> Result<UnreadSummary, String> {
+    let mut conn = open_database(&app)?;
+
+    if let Some(ids) = article_ids.filter(|ids| !ids.is_empty()) {
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to start transaction: {e}"))?;
+        for article_id in ids {
+            tx.execute(
+                "UPDATE articles
+                 SET read_status = 1, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                params![article_id],
+            )
+            .map_err(|e| format!("Failed to mark article read: {e}"))?;
+        }
+        tx.commit()
+            .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+    } else if let Some(id) = feed_id {
+        conn.execute(
+            "UPDATE articles
+             SET read_status = 1, updated_at = CURRENT_TIMESTAMP
+             WHERE feed_id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("Failed to mark feed articles read: {e}"))?;
+    } else {
+        conn.execute(
+            "UPDATE articles
+             SET read_status = 1, updated_at = CURRENT_TIMESTAMP",
+            [],
+        )
+        .map_err(|e| format!("Failed to mark all articles read: {e}"))?;
+    }
+
+    load_unread_summary(&conn)
 }
 
 fn load_setting_value(conn: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -237,73 +1449,6 @@ fn get_llm_config_from_db(conn: &Connection) -> Result<LlmConfig, String> {
 }
 
 #[tauri::command]
-fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
-    let conn = open_database(&app)?;
-
-    let mut stmt = conn
-        .prepare("SELECT id, title, unread FROM feeds ORDER BY title ASC")
-        .map_err(|error| format!("Failed to prepare feeds query: {error}"))?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(Feed {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                unread: row.get(2)?,
-            })
-        })
-        .map_err(|error| format!("Failed to query feeds: {error}"))?;
-
-    let mut feeds = Vec::new();
-
-    for row in rows {
-        feeds.push(row.map_err(|error| format!("Failed to read feed row: {error}"))?);
-    }
-
-    Ok(feeds)
-}
-
-#[tauri::command]
-fn list_articles(app: AppHandle) -> Result<Vec<Article>, String> {
-    let conn = open_database(&app)?;
-
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT id, feed_id, title, source, published_at, excerpt, content,
-                   summary, translation
-            FROM articles
-            ORDER BY created_at ASC
-            ",
-        )
-        .map_err(|error| format!("Failed to prepare articles query: {error}"))?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(Article {
-                id: row.get(0)?,
-                feed_id: row.get(1)?,
-                title: row.get(2)?,
-                source: row.get(3)?,
-                published_at: row.get(4)?,
-                excerpt: row.get(5)?,
-                content: row.get(6)?,
-                summary: row.get(7)?,
-                translation: row.get(8)?,
-            })
-        })
-        .map_err(|error| format!("Failed to query articles: {error}"))?;
-
-    let mut articles = Vec::new();
-
-    for row in rows {
-        articles.push(row.map_err(|error| format!("Failed to read article row: {error}"))?);
-    }
-
-    Ok(articles)
-}
-
-#[tauri::command]
 fn save_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
     let conn = open_database(&app)?;
     conn.execute(
@@ -327,10 +1472,13 @@ fn get_llm_config(app: AppHandle) -> Result<LlmConfig, String> {
 }
 
 #[tauri::command]
-fn summarize_article(app: AppHandle, article_id: String, force: Option<bool>) -> Result<String, String> {
+fn summarize_article(
+    app: AppHandle,
+    article_id: String,
+    force: Option<bool>,
+) -> Result<String, String> {
     let conn = open_database(&app)?;
 
-    // Return cached summary unless force is true
     if force != Some(true) {
         let cached: Option<String> = conn
             .query_row(
@@ -377,10 +1525,13 @@ fn summarize_article(app: AppHandle, article_id: String, force: Option<bool>) ->
 }
 
 #[tauri::command]
-fn translate_article(app: AppHandle, article_id: String, target_lang: String) -> Result<String, String> {
+fn translate_article(
+    app: AppHandle,
+    article_id: String,
+    target_lang: String,
+) -> Result<String, String> {
     let conn = open_database(&app)?;
 
-    // Return cached translation
     let cached: Option<String> = conn
         .query_row(
             "SELECT translation FROM articles WHERE id = ?1",
@@ -423,7 +1574,10 @@ fn translate_article(app: AppHandle, article_id: String, target_lang: String) ->
     );
     let translation = llm_provider::call_llm(
         &config,
-        &format!("You are a professional translator. Translate the user's text into {}.", lang_name),
+        &format!(
+            "You are a professional translator. Translate the user's text into {}.",
+            lang_name
+        ),
         &prompt,
     )?;
 
@@ -439,15 +1593,38 @@ fn translate_article(app: AppHandle, article_id: String, target_lang: String) ->
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(sync::SyncState::default())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             list_feeds,
             list_articles,
+            get_article,
+            set_article_favorite,
+            set_article_read_later,
+            set_article_read_status,
+            mark_articles_read,
+            list_annotations,
+            create_annotation,
+            update_annotation,
+            delete_annotation,
+            search_articles,
+            add_feed,
+            refresh_feed,
+            sync::start_sync,
+            sync::get_sync_status,
+            sync::retry_failed_syncs,
+            sync::get_sync_config,
+            sync::update_sync_config,
             save_setting,
             load_setting,
             get_llm_config,
             summarize_article,
             translate_article,
+            clean_article,
+            fetch_and_clean_article,
+            opml::import_opml,
+            opml::export_opml,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

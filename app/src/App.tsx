@@ -1,24 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Sidebar } from "./components/Sidebar";
+import { ArticleList } from "./components/ArticleList";
+import type { Feed, Article, ReadFilter, UnreadSummary, SyncStatus } from "./types";
 import "./App.css";
 
-type Feed = {
-  id: string;
-  title: string;
-  unread: number;
-};
-
-type Article = {
-  id: string;
-  feedId: string;
-  title: string;
-  source: string;
-  publishedAt: string;
-  excerpt: string;
-  content: string;
-  summary?: string;
-  translation?: string;
-};
+/* ── Mock data (pure frontend dev — Tauri invoke unavailable) ── */
+const MOCK_FEEDS: Feed[] = [];
+const MOCK_ARTICLES: Article[] = [];
 
 type ReadView = "original" | "translation" | "bilingual";
 
@@ -27,7 +16,9 @@ function App() {
   const [articles, setArticles] = useState<Article[]>([]);
   const [selectedFeedId, setSelectedFeedId] = useState("all");
   const [selectedArticleId, setSelectedArticleId] = useState<string | null>(null);
+  const [readFilter, setReadFilter] = useState<ReadFilter>("all");
   const [isLoading, setIsLoading] = useState(true);
+  const [isUpdatingReadStatus, setIsUpdatingReadStatus] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // AI feature states
@@ -40,34 +31,110 @@ function App() {
   const [readView, setReadView] = useState<ReadView>("original");
   const [targetLang, setTargetLang] = useState("zh");
 
-  async function loadLocalData() {
+  // Sync status
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+
+  const refreshSyncStatus = useCallback(async () => {
+    try {
+      setSyncStatus(await invoke<SyncStatus>("get_sync_status"));
+    } catch {
+      // Sync status unavailable
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSyncStatus();
+  }, [refreshSyncStatus]);
+
+  useEffect(() => {
+    if (syncStatus?.phase !== "running") return;
+    const timer = window.setInterval(() => {
+      void refreshSyncStatus();
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [syncStatus?.phase, refreshSyncStatus]);
+
+  const loadData = useCallback(async (feedId = selectedFeedId, filter = readFilter) => {
     try {
       setIsLoading(true);
       setErrorMessage(null);
+      const listFeedId = feedId === "all" ? null : feedId;
 
       const [nextFeeds, nextArticles] = await Promise.all([
         invoke<Feed[]>("list_feeds"),
-        invoke<Article[]>("list_articles"),
+        invoke<Article[]>("list_articles", { feedId: listFeedId, readFilter: filter }),
       ]);
 
       setFeeds(nextFeeds);
       setArticles(nextArticles);
 
-      if (nextArticles.length > 0) {
-        setSelectedArticleId((current) => current ?? nextArticles[0].id);
-      }
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
+      setSelectedArticleId((current) =>
+        nextArticles.some((article) => article.id === current)
+          ? current
+          : nextArticles[0]?.id ?? null,
+      );
+    } catch {
+      /* Pure frontend dev — Tauri invoke unavailable, fall back to mock */
+      setFeeds(MOCK_FEEDS);
+      setArticles(MOCK_ARTICLES);
+      setSelectedArticleId((current) => current ?? MOCK_ARTICLES[0]?.id ?? null);
     } finally {
       setIsLoading(false);
     }
-  }
+  }, [selectedFeedId, readFilter]);
 
   useEffect(() => {
-    void loadLocalData();
+    void loadData();
+  }, [loadData]);
+
+  const refreshFeeds = useCallback(async () => {
+    try {
+      setFeeds(await invoke<Feed[]>("list_feeds"));
+    } catch {
+      setFeeds(MOCK_FEEDS);
+    }
   }, []);
 
-  async function loadSettings() {
+  async function handleToggleReadStatus(article: Article) {
+    try {
+      setIsUpdatingReadStatus(true);
+      const updated = await invoke<Article>("set_article_read_status", {
+        articleId: article.id,
+        isRead: !article.isRead,
+      });
+      setArticles((prev) => {
+        const next = prev.map((item) =>
+          item.id === updated.id ? { ...item, ...updated } : item,
+        );
+        if (readFilter === "all") return next;
+        return next.filter((item) =>
+          readFilter === "read" ? item.isRead : !item.isRead,
+        );
+      });
+      await refreshFeeds();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsUpdatingReadStatus(false);
+    }
+  }
+
+  async function handleMarkCurrentFeedRead() {
+    try {
+      setIsUpdatingReadStatus(true);
+      await invoke<UnreadSummary>("mark_articles_read", {
+        feedId: selectedFeedId === "all" ? null : selectedFeedId,
+        articleIds: null,
+      });
+      await loadData();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsUpdatingReadStatus(false);
+    }
+  }
+
+  const loadSettings = useCallback(async () => {
     try {
       const [baseUrl, apiKey, modelName] = await Promise.all([
         invoke<string | null>("load_setting", { key: "llm_base_url" }),
@@ -82,13 +149,13 @@ function App() {
     } catch {
       // Settings not configured yet
     }
-  }
+  }, []);
 
   useEffect(() => {
     if (showSettings) {
       void loadSettings();
     }
-  }, [showSettings]);
+  }, [showSettings, loadSettings]);
 
   async function handleSaveSettings() {
     try {
@@ -145,149 +212,57 @@ function App() {
     }
   }
 
-  const allFeed: Feed = useMemo(
-    () => ({
-      id: "all",
-      title: "All Feeds",
-      unread: feeds.reduce((sum, feed) => sum + feed.unread, 0),
-    }),
-    [feeds],
-  );
+  const visibleArticles = articles;
 
-  const visibleFeeds = useMemo(() => [allFeed, ...feeds], [allFeed, feeds]);
-
-  const visibleArticles = useMemo(() => {
-    if (selectedFeedId === "all") {
-      return articles;
-    }
-
-    return articles.filter((article) => article.feedId === selectedFeedId);
-  }, [articles, selectedFeedId]);
-
-  const selectedArticle = useMemo(() => {
-    return (
-      articles.find((article) => article.id === selectedArticleId) ??
+  const selectedArticle = useMemo(
+    () =>
+      articles.find((a) => a.id === selectedArticleId) ??
       visibleArticles[0] ??
-      null
-    );
-  }, [articles, selectedArticleId, visibleArticles]);
-
-  useEffect(() => {
-    if (
-      visibleArticles.length > 0 &&
-      !visibleArticles.some((article) => article.id === selectedArticleId)
-    ) {
-      setSelectedArticleId(visibleArticles[0].id);
-    }
-  }, [selectedArticleId, visibleArticles]);
-
-  function handleSelectFeed(feedId: string) {
-    setSelectedFeedId(feedId);
-  }
+      null,
+    [articles, selectedArticleId, visibleArticles],
+  );
 
   return (
     <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">M</div>
-          <div>
-            <h1>Mercury</h1>
-            <p>AI Reader</p>
-          </div>
-        </div>
-
-        <section className="panel-section">
-          <div className="section-title">Feeds</div>
-          <div className="feed-list">
-            {visibleFeeds.map((feed) => (
-              <button
-                key={feed.id}
-                className={
-                  feed.id === selectedFeedId ? "feed-item active" : "feed-item"
-                }
-                onClick={() => handleSelectFeed(feed.id)}
-              >
-                <span>{feed.title}</span>
-                <span className="badge">{feed.unread}</span>
-              </button>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel-section bottom-section">
-          <div className="section-title">MVP Status</div>
-          <ul className="status-list">
-            <li>Feed / OPML</li>
-            <li>Cleaned HTML</li>
-            <li>Summary Agent</li>
-            <li>Translation Agent</li>
-          </ul>
-          <button className="settings-btn" onClick={() => setShowSettings(true)}>
-            <span className="settings-icon">&#9881;</span> Settings
-          </button>
-        </section>
-      </aside>
-
-      <section className="article-list">
-        <div className="toolbar">
-          <div>
-            <h2>Articles</h2>
-            <p>
-              {isLoading
-                ? "Loading local data..."
-                : `${visibleArticles.length} local items`}
-            </p>
-          </div>
-          <button className="primary-button" onClick={loadLocalData}>
-            Refresh
-          </button>
-        </div>
-
-        <div className="search-box">
-          <input placeholder="Search articles..." />
-        </div>
-
-        {errorMessage && <div className="error-box">{errorMessage}</div>}
-
-        <div className="cards">
-          {visibleArticles.map((article) => (
-            <button
-              key={article.id}
-              className={
-                article.id === selectedArticle?.id
-                  ? "article-card active"
-                  : "article-card"
-              }
-              onClick={() => setSelectedArticleId(article.id)}
-            >
-              <div className="article-meta">
-                <span>{article.source}</span>
-                <span>{article.publishedAt}</span>
-              </div>
-              <h3>{article.title}</h3>
-              <p>{article.excerpt}</p>
-              {article.summary && (
-                <p className="card-summary-indicator">Has summary</p>
-              )}
-            </button>
-          ))}
-        </div>
-      </section>
+      <Sidebar
+        feeds={feeds}
+        selectedFeedId={selectedFeedId}
+        syncStatus={syncStatus}
+        onSelectFeed={setSelectedFeedId}
+        onFeedsChange={loadData}
+        onSyncStatusChange={refreshSyncStatus}
+      />
+      <ArticleList
+        articles={visibleArticles}
+        selectedArticleId={selectedArticle?.id ?? null}
+        isLoading={isLoading}
+        readFilter={readFilter}
+        isUpdatingReadStatus={isUpdatingReadStatus}
+        onSelectArticle={setSelectedArticleId}
+        onReadFilterChange={setReadFilter}
+        onToggleReadStatus={handleToggleReadStatus}
+        onMarkCurrentFeedRead={handleMarkCurrentFeedRead}
+      />
 
       <article className="reader">
+        {errorMessage && <div className="error-box">{errorMessage}</div>}
         {selectedArticle ? (
           <>
             <div className="reader-header">
               <div>
                 <div className="article-meta">
-                  <span>{selectedArticle.source}</span>
-                  <span>{selectedArticle.publishedAt}</span>
+                  <span>{selectedArticle.author ?? "未知作者"}</span>
+                  <span>
+                    {selectedArticle.publishedAt
+                      ? new Date(selectedArticle.publishedAt).toLocaleDateString("zh-CN")
+                      : ""}
+                  </span>
                 </div>
                 <h2>{selectedArticle.title}</h2>
               </div>
-
               <div className="reader-actions">
                 <button
+                  type="button"
                   onClick={() => handleSummarize()}
                   disabled={isSummarizing}
                   className={isSummarizing ? "action-loading" : ""}
@@ -295,6 +270,7 @@ function App() {
                   {isSummarizing ? "Summarizing..." : selectedArticle.summary ? "Regenerate Summary" : "Summary"}
                 </button>
                 <button
+                  type="button"
                   onClick={() => handleTranslate()}
                   disabled={isTranslating}
                   className={isTranslating ? "action-loading" : ""}
@@ -311,12 +287,19 @@ function App() {
                   <option value="ja">Japanese</option>
                   <option value="ko">Korean</option>
                 </select>
+                <button
+                  type="button"
+                  className="settings-toggle-btn"
+                  onClick={() => setShowSettings(true)}
+                  title="LLM Settings"
+                >
+                  &#9881;
+                </button>
               </div>
             </div>
 
             {aiError && <div className="error-box">{aiError}</div>}
 
-            {/* Summary section */}
             {selectedArticle.summary && (
               <div className="ai-result-section">
                 <div className="ai-result-label">Summary</div>
@@ -324,22 +307,24 @@ function App() {
               </div>
             )}
 
-            {/* View tabs */}
             {selectedArticle.translation && (
               <div className="view-tabs">
                 <button
+                  type="button"
                   className={readView === "original" ? "view-tab active" : "view-tab"}
                   onClick={() => setReadView("original")}
                 >
                   Original
                 </button>
                 <button
+                  type="button"
                   className={readView === "translation" ? "view-tab active" : "view-tab"}
                   onClick={() => setReadView("translation")}
                 >
                   Translation
                 </button>
                 <button
+                  type="button"
                   className={readView === "bilingual" ? "view-tab active" : "view-tab"}
                   onClick={() => setReadView("bilingual")}
                 >
@@ -350,21 +335,7 @@ function App() {
 
             <div className="reader-content">
               {(readView === "original" || readView === "bilingual") && (
-                <p>{selectedArticle.content}</p>
-              )}
-
-              {(readView === "original" || readView === "bilingual") && (
-                <>
-                  <h3>Local data milestone</h3>
-                  <p>
-                    This article is now loaded from the local SQLite database through
-                    Tauri commands instead of being hard-coded in the React UI.
-                  </p>
-                  <blockquote>
-                    Next step: add real Feed / OPML parsing and store fetched
-                    articles into the same local database.
-                  </blockquote>
-                </>
+                <div dangerouslySetInnerHTML={{ __html: selectedArticle.content }} />
               )}
 
               {(readView === "translation" || readView === "bilingual") && selectedArticle.translation && (
@@ -377,15 +348,15 @@ function App() {
           </>
         ) : (
           <div className="empty-reader">
-            {isLoading ? "Loading local articles..." : "No article selected."}
+            {isLoading ? "加载中..." : "请从左侧选择文章"}
           </div>
         )}
       </article>
 
       {/* Settings Modal */}
       {showSettings && (
-        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay">
+          <div className="modal-content">
             <h2>LLM Settings</h2>
             <p className="modal-desc">
               Configure your LLM provider. Supports OpenAI, DeepSeek, Ollama, and any OpenAI-compatible API.
@@ -421,10 +392,10 @@ function App() {
               </label>
 
               <div className="modal-actions">
-                <button className="primary-button" onClick={handleSaveSettings} disabled={isSavingSettings}>
+                <button type="button" className="primary-button" onClick={handleSaveSettings} disabled={isSavingSettings}>
                   {isSavingSettings ? "Saving..." : "Save"}
                 </button>
-                <button onClick={() => setShowSettings(false)}>Cancel</button>
+                <button type="button" onClick={() => setShowSettings(false)}>Cancel</button>
               </div>
             </div>
           </div>
