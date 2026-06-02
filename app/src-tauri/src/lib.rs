@@ -104,6 +104,25 @@ fn seed_database(conn: &Connection) -> Result<(), String> {
         .query_row("SELECT COUNT(*) FROM feeds", [], |row| row.get(0))
         .map_err(|error| format!("Failed to count feeds: {error}"))?;
 
+    // LLM default settings — always run so provider config stays in sync
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params!["llm_base_url", "https://chat.ecnu.edu.cn/open/api"],
+    )
+    .map_err(|error| format!("Failed to seed llm_base_url: {error}"))?;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params!["llm_api_key", "sk-8ff670c62b634986aa98669c1444911b"],
+    )
+    .map_err(|error| format!("Failed to seed llm_api_key: {error}"))?;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params!["llm_model_name", "ecnu-plus"],
+    )
+    .map_err(|error| format!("Failed to seed llm_model_name: {error}"))?;
+
     if feed_count > 0 {
         return Ok(());
     }
