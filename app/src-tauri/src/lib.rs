@@ -16,6 +16,7 @@ use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 const CLEANER_VERSION: &str = "node-readability-v4";
+const FALLBACK_CLEANER_VERSION: &str = "rust-fallback-v1";
 pub(crate) const SAVED_ARTICLES_FEED_ID: &str = "saved";
 const SAVED_ARTICLES_FEED_URL: &str = "mercury://saved-articles";
 
@@ -91,13 +92,18 @@ struct NodeCleanerInput {
     url: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct NodeCleanerOutput {
     title: Option<String>,
     byline: Option<String>,
     excerpt: Option<String>,
     cleaned_html: Option<String>,
     cleaned_markdown: Option<String>,
+}
+
+struct CleanerRunResult {
+    output: NodeCleanerOutput,
+    version: &'static str,
 }
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -740,27 +746,163 @@ fn fallback_html_from_article(article: &Article) -> String {
     format!("<article>{}</article>", blocks.join("\n"))
 }
 
-fn node_script_path() -> PathBuf {
+fn remove_html_block_case_insensitive(input: &str, tag: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let open_tag = format!("<{tag}");
+    let close_tag = format!("</{tag}>");
+    let mut result = String::with_capacity(input.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = lower[cursor..].find(&open_tag) {
+        let start = cursor + relative_start;
+        result.push_str(&input[cursor..start]);
+
+        if let Some(relative_end) = lower[start..].find(&close_tag) {
+            cursor = start + relative_end + close_tag.len();
+        } else {
+            cursor = input.len();
+            break;
+        }
+    }
+
+    result.push_str(&input[cursor..]);
+    result
+}
+
+fn extract_html_tag_text(html: &str, tag: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open_tag = format!("<{tag}");
+    let close_tag = format!("</{tag}>");
+    let start = lower.find(&open_tag)?;
+    let content_start = lower[start..].find('>')? + start + 1;
+    let end = lower[content_start..].find(&close_tag)? + content_start;
+    normalize_optional_text(Some(strip_html_tags(&html[content_start..end])))
+}
+
+fn extract_preferred_html_section(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    for tag in ["article", "main", "body"] {
+        let open_tag = format!("<{tag}");
+        let close_tag = format!("</{tag}>");
+        if let Some(start) = lower.find(&open_tag) {
+            if let Some(open_end) = lower[start..].find('>') {
+                let content_start = start + open_end + 1;
+                if let Some(relative_end) = lower[content_start..].find(&close_tag) {
+                    let end = content_start + relative_end;
+                    return html[content_start..end].to_string();
+                }
+            }
+        }
+    }
+
+    html.to_string()
+}
+
+fn html_to_basic_markdown(html: &str) -> String {
+    let mut text = html
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("</p>", "\n\n")
+        .replace("</div>", "\n\n")
+        .replace("</section>", "\n\n")
+        .replace("</article>", "\n\n")
+        .replace("</li>", "\n")
+        .replace("</h1>", "\n\n")
+        .replace("</h2>", "\n\n")
+        .replace("</h3>", "\n\n")
+        .replace("</h4>", "\n\n")
+        .replace("</h5>", "\n\n")
+        .replace("</h6>", "\n\n")
+        .replace("</tr>", "\n");
+
+    text = strip_html_tags(&text);
+    text.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("\n\n\n", "\n\n")
+}
+
+fn fallback_cleaner_output(html: &str, url: Option<&str>, title_hint: Option<&str>) -> NodeCleanerOutput {
+    let sanitized = remove_html_block_case_insensitive(
+        &remove_html_block_case_insensitive(
+            &remove_html_block_case_insensitive(html, "script"),
+            "style",
+        ),
+        "noscript",
+    );
+    let body = extract_preferred_html_section(&sanitized);
+    let cleaned_html = format!("<article>{}</article>", body.trim());
+    let cleaned_markdown = html_to_basic_markdown(&cleaned_html);
+    let title = extract_html_tag_text(html, "title")
+        .or_else(|| title_hint.map(str::to_string))
+        .or_else(|| url.map(str::to_string));
+    let excerpt = normalize_optional_text(Some(cleaned_markdown.clone())).map(|markdown| {
+        let mut chars = markdown.chars();
+        let excerpt: String = chars.by_ref().take(220).collect();
+        if chars.next().is_some() {
+            format!("{excerpt}...")
+        } else {
+            excerpt
+        }
+    });
+
+    NodeCleanerOutput {
+        title,
+        byline: None,
+        excerpt,
+        cleaned_html: Some(cleaned_html),
+        cleaned_markdown: Some(cleaned_markdown),
+    }
+}
+
+fn node_script_path(app: &AppHandle) -> PathBuf {
+    let bundled = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join("scripts").join("article-cleaner.mjs"));
+
+    if let Some(path) = bundled.filter(|path| path.exists()) {
+        return path;
+    }
+
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("scripts")
         .join("article-cleaner.mjs")
 }
 
-async fn run_node_cleaner(html: String, url: Option<String>) -> Result<NodeCleanerOutput, String> {
-    let script_path = node_script_path();
+async fn run_node_cleaner(
+    app: &AppHandle,
+    html: String,
+    url: Option<String>,
+    title_hint: Option<String>,
+) -> Result<CleanerRunResult, String> {
+    let script_path = node_script_path(app);
+    let fallback_output = fallback_cleaner_output(&html, url.as_deref(), title_hint.as_deref());
 
     tauri::async_runtime::spawn_blocking(move || {
         let payload = serde_json::to_vec(&NodeCleanerInput { html, url })
             .map_err(|error| format!("Failed to serialize cleaner input: {error}"))?;
 
-        let mut child = Command::new("node")
+        let child_result = Command::new("node")
             .arg(script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("Failed to start Node article cleaner: {error}"))?;
+            .spawn();
+
+        let mut child = match child_result {
+            Ok(child) => child,
+            Err(_) => {
+                return Ok(CleanerRunResult {
+                    output: fallback_output.clone(),
+                    version: FALLBACK_CLEANER_VERSION,
+                })
+            }
+        };
 
         let mut stdin = child
             .stdin
@@ -776,16 +918,22 @@ async fn run_node_cleaner(html: String, url: Option<String>) -> Result<NodeClean
             .map_err(|error| format!("Failed to wait for Node article cleaner: {error}"))?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(if stderr.is_empty() {
-                "Node article cleaner exited with an unknown error".to_string()
-            } else {
-                format!("Node article cleaner failed: {stderr}")
+            return Ok(CleanerRunResult {
+                output: fallback_output.clone(),
+                version: FALLBACK_CLEANER_VERSION,
             });
         }
 
-        serde_json::from_slice::<NodeCleanerOutput>(&output.stdout)
-            .map_err(|error| format!("Failed to decode Node cleaner output: {error}"))
+        match serde_json::from_slice::<NodeCleanerOutput>(&output.stdout) {
+            Ok(cleaned) => Ok(CleanerRunResult {
+                output: cleaned,
+                version: CLEANER_VERSION,
+            }),
+            Err(_) => Ok(CleanerRunResult {
+                output: fallback_output,
+                version: FALLBACK_CLEANER_VERSION,
+            }),
+        }
     })
     .await
     .map_err(|error| format!("Node cleaner task failed: {error}"))?
@@ -852,6 +1000,7 @@ fn save_cleaned_article(
     raw_html: Option<&str>,
     final_url: Option<&str>,
     cleaned: NodeCleanerOutput,
+    cleaner_version: &str,
 ) -> Result<(), String> {
     let cleaned_html = normalize_optional_text(cleaned.cleaned_html)
         .ok_or_else(|| "Article cleaner returned empty cleaned_html".to_string())?;
@@ -884,7 +1033,7 @@ fn save_cleaned_article(
             title,
             author,
             excerpt,
-            CLEANER_VERSION,
+            cleaner_version,
             final_url
         ],
     )
@@ -1273,14 +1422,21 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
         (fallback_html, None, article.final_url.clone())
     };
 
-    let cleaned = run_node_cleaner(html_for_cleaning, Some(article.url.clone())).await?;
+    let cleaned = run_node_cleaner(
+        &app,
+        html_for_cleaning,
+        Some(article.url.clone()),
+        Some(article.title.clone()),
+    )
+    .await?;
     let conn = open_database(&app)?;
     save_cleaned_article(
         &conn,
         &article_id,
         raw_html_to_store.as_deref(),
         final_url.as_deref(),
-        cleaned,
+        cleaned.output,
+        cleaned.version,
     )?;
 
     load_article_by_id(&conn, &article_id)
@@ -1290,14 +1446,21 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
 async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article, String> {
     let normalized_url = normalize_fetch_url(&url)?;
     let raw_html = fetch_html(&normalized_url).await?;
-    let cleaned = run_node_cleaner(raw_html.clone(), Some(normalized_url.clone())).await?;
-    let cleaned_html = normalize_optional_text(cleaned.cleaned_html)
+    let cleaned = run_node_cleaner(
+        &app,
+        raw_html.clone(),
+        Some(normalized_url.clone()),
+        Some(normalized_url.clone()),
+    )
+    .await?;
+    let cleaned_html = normalize_optional_text(cleaned.output.cleaned_html)
         .ok_or_else(|| "Article cleaner returned empty cleaned_html".to_string())?;
-    let cleaned_markdown = normalize_optional_text(cleaned.cleaned_markdown)
+    let cleaned_markdown = normalize_optional_text(cleaned.output.cleaned_markdown)
         .ok_or_else(|| "Article cleaner returned empty cleaned_markdown".to_string())?;
-    let title = normalize_optional_text(cleaned.title).unwrap_or_else(|| normalized_url.clone());
-    let author = normalize_optional_text(cleaned.byline);
-    let excerpt = normalize_optional_text(cleaned.excerpt).unwrap_or_default();
+    let title = normalize_optional_text(cleaned.output.title).unwrap_or_else(|| normalized_url.clone());
+    let author = normalize_optional_text(cleaned.output.byline);
+    let excerpt = normalize_optional_text(cleaned.output.excerpt).unwrap_or_default();
+    let cleaner_version = cleaned.version;
 
     let conn = open_database(&app)?;
     ensure_saved_articles_feed(&conn)?;
@@ -1340,7 +1503,7 @@ async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article,
                     raw_html,
                     cleaned_html,
                     cleaned_markdown,
-                    CLEANER_VERSION,
+                    cleaner_version,
                     normalized_url
                 ],
             )
@@ -1370,7 +1533,7 @@ async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article,
                     raw_html,
                     cleaned_html,
                     cleaned_markdown,
-                    CLEANER_VERSION,
+                    cleaner_version,
                     normalized_url
                 ],
             )
@@ -1400,7 +1563,7 @@ async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article,
                     raw_html,
                     cleaned_html,
                     cleaned_markdown,
-                    CLEANER_VERSION
+                    cleaner_version
                 ],
             )
         } else {
@@ -1423,7 +1586,7 @@ async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article,
                     raw_html,
                     cleaned_html,
                     cleaned_markdown,
-                    CLEANER_VERSION
+                    cleaner_version
                 ],
             )
         }

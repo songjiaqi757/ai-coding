@@ -1,21 +1,24 @@
-name: Internal Test Build
+name: Release Desktop App
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 jobs:
-  build-artifacts:
+  build-and-release:
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: macos-latest
-            artifact_name: mercury-macos-bundle
+            args: ""
           - platform: windows-latest
-            artifact_name: mercury-windows-bundle
+            args: ""
 
     runs-on: ${{ matrix.platform }}
 
@@ -40,12 +43,17 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build desktop bundles
-        run: npm run tauri build
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+      - name: Build and publish Tauri bundles
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: ${{ matrix.artifact_name }}
-          path: app/src-tauri/target/release/bundle/
-          if-no-files-found: error
+          projectPath: app
+          tagName: v__VERSION__
+          releaseName: "Mercury v__VERSION__"
+          releaseBody: "Internal release build for Mercury. Download the desktop assets for macOS and Windows below."
+          releaseDraft: false
+          prerelease: true
+          includeUpdaterJson: false
+          tauriScript: npm run tauri
+          args: ${{ matrix.args }}
