@@ -2,14 +2,16 @@ mod llm_provider;
 pub mod opml;
 pub mod sync;
 
+use encoding_rs::Encoding;
 use llm_provider::LlmConfig;
-use reqwest::{Client, Url};
+use reqwest::{header::CONTENT_TYPE, Client, Url};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
@@ -604,6 +606,86 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     })
 }
 
+fn collapse_whitespace(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_html_tags(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut in_tag = false;
+
+    for ch in input.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+                output.push(' ');
+            }
+            '>' => {
+                in_tag = false;
+                output.push(' ');
+            }
+            _ if !in_tag => output.push(ch),
+            _ => {}
+        }
+    }
+
+    collapse_whitespace(&output)
+}
+
+fn article_text_for_ai(conn: &Connection, article_id: &str) -> Result<String, String> {
+    let (title, cleaned_markdown, cleaned_html, content, excerpt): (
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT title, cleaned_markdown, cleaned_html, content, excerpt
+             FROM articles
+             WHERE id = ?1",
+            params![article_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("Article not found: {e}"))?;
+
+    let body = normalize_optional_text(cleaned_markdown)
+        .or_else(|| normalize_optional_text(cleaned_html).map(|html| strip_html_tags(&html)))
+        .or_else(|| normalize_optional_text(Some(content)).map(|html| strip_html_tags(&html)))
+        .or_else(|| normalize_optional_text(Some(excerpt)).map(|html| strip_html_tags(&html)))
+        .ok_or_else(|| "Article content is empty. Please open the article first so the app can fetch and clean it.".to_string())?;
+
+    let text = collapse_whitespace(&format!("{}\n\n{}", title.trim(), body));
+    if text.chars().count() < 40 {
+        return Err("Article content is too short to summarize or translate reliably.".to_string());
+    }
+
+    Ok(text)
+}
+
+fn is_invalid_ai_result(result: &str) -> bool {
+    let normalized = result.trim();
+    if normalized.is_empty() {
+        return true;
+    }
+
+    let lowered = normalized.to_ascii_lowercase();
+    lowered.starts_with("please provide the text of the article")
+        || lowered.starts_with("please provide the text you would like me to summarize")
+        || lowered.starts_with("please translate the following article into")
+        || normalized.starts_with("请将以下文章翻译成")
+        || normalized.starts_with("请提供需要总结的文章")
+        || normalized.starts_with("请提供要翻译的文章")
+}
+
 fn escape_html(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -611,6 +693,32 @@ fn escape_html(input: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+fn extract_charset_from_content_type(value: &str) -> Option<String> {
+    value
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("charset=").map(str::trim))
+        .map(|value| value.trim_matches('"').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn extract_charset_from_html(bytes: &[u8]) -> Option<String> {
+    let sniff_len = bytes.len().min(8192);
+    let head = String::from_utf8_lossy(&bytes[..sniff_len]).to_ascii_lowercase();
+
+    if let Some(index) = head.find("charset=") {
+        let charset = head[index + "charset=".len()..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':'))
+            .collect::<String>();
+        if !charset.is_empty() {
+            return Some(charset);
+        }
+    }
+
+    None
 }
 
 fn fallback_html_from_article(article: &Article) -> String {
@@ -685,6 +793,8 @@ async fn run_node_cleaner(html: String, url: Option<String>) -> Result<NodeClean
 
 async fn fetch_html(url: &str) -> Result<String, String> {
     let client = Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("Failed to create HTTP client: {error}"))?;
     let response = client
@@ -700,10 +810,24 @@ async fn fetch_html(url: &str) -> Result<String, String> {
         ));
     }
 
-    response
-        .text()
+    let header_charset = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(extract_charset_from_content_type);
+
+    let bytes = response
+        .bytes()
         .await
-        .map_err(|error| format!("Failed to read article HTML: {error}"))
+        .map_err(|error| format!("Failed to read article HTML: {error}"))?;
+
+    let charset = header_charset
+        .or_else(|| extract_charset_from_html(&bytes))
+        .unwrap_or_else(|| "utf-8".to_string());
+
+    let encoding = Encoding::for_label(charset.as_bytes()).unwrap_or(encoding_rs::UTF_8);
+    let (decoded, _, _) = encoding.decode(&bytes);
+    Ok(decoded.into_owned())
 }
 
 fn load_article_by_id(conn: &Connection, article_id: &str) -> Result<Article, String> {
@@ -1448,6 +1572,46 @@ fn get_llm_config_from_db(conn: &Connection) -> Result<LlmConfig, String> {
     })
 }
 
+fn language_name(target_lang: &str) -> &str {
+    match target_lang {
+        "zh" => "Chinese",
+        "en" => "English",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        _ => target_lang,
+    }
+}
+
+fn translate_text_with_config(
+    config: &LlmConfig,
+    text: &str,
+    target_lang: &str,
+) -> Result<String, String> {
+    let lang_name = language_name(target_lang);
+    let prompt = format!(
+        "Translate the following text into {}. Preserve the original meaning and tone. Reply with the translation only.\n\n{}",
+        lang_name, text
+    );
+    let translation = llm_provider::call_llm(
+        config,
+        &format!(
+            "You are a professional translator. Translate the user's text into {}.",
+            lang_name
+        ),
+        &prompt,
+    )?;
+    if is_invalid_ai_result(&translation) {
+        return Err(
+            "LLM returned an invalid translation. Please check the configured model/provider and try again."
+                .to_string(),
+        );
+    }
+    Ok(translation)
+}
+
 #[tauri::command]
 fn save_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
     let conn = open_database(&app)?;
@@ -1490,30 +1654,26 @@ fn summarize_article(
             .flatten();
 
         if let Some(ref s) = cached {
-            if !s.is_empty() {
+            if !s.is_empty() && !is_invalid_ai_result(s) {
                 return Ok(s.clone());
             }
         }
     }
 
-    let content: String = conn
-        .query_row(
-            "SELECT content FROM articles WHERE id = ?1",
-            params![article_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Article not found: {e}"))?;
-
     let config = get_llm_config_from_db(&conn)?;
+    let article_text = article_text_for_ai(&conn, &article_id)?;
     let prompt = format!(
-        "Please provide a concise summary of the following article in 2-3 sentences:\n\n{}",
-        content
+        "Summarize the following article in 2-3 sentences. Reply with the summary only.\n\n{}",
+        article_text
     );
     let summary = llm_provider::call_llm(
         &config,
         "You are a helpful assistant that summarizes articles concisely.",
         &prompt,
     )?;
+    if is_invalid_ai_result(&summary) {
+        return Err("LLM returned an invalid summary. Please check the configured model/provider and try again.".to_string());
+    }
 
     conn.execute(
         "UPDATE articles SET summary = ?1 WHERE id = ?2",
@@ -1542,44 +1702,14 @@ fn translate_article(
         .flatten();
 
     if let Some(ref s) = cached {
-        if !s.is_empty() {
+        if !s.is_empty() && !is_invalid_ai_result(s) {
             return Ok(s.clone());
         }
     }
 
-    let content: String = conn
-        .query_row(
-            "SELECT content FROM articles WHERE id = ?1",
-            params![article_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Article not found: {e}"))?;
-
     let config = get_llm_config_from_db(&conn)?;
-
-    let lang_name = match target_lang.as_str() {
-        "zh" => "Chinese",
-        "en" => "English",
-        "ja" => "Japanese",
-        "ko" => "Korean",
-        "fr" => "French",
-        "de" => "German",
-        "es" => "Spanish",
-        _ => &target_lang,
-    };
-
-    let prompt = format!(
-        "Please translate the following article into {}. Preserve the original meaning and tone:\n\n{}",
-        lang_name, content
-    );
-    let translation = llm_provider::call_llm(
-        &config,
-        &format!(
-            "You are a professional translator. Translate the user's text into {}.",
-            lang_name
-        ),
-        &prompt,
-    )?;
+    let article_text = article_text_for_ai(&conn, &article_id)?;
+    let translation = translate_text_with_config(&config, &article_text, &target_lang)?;
 
     conn.execute(
         "UPDATE articles SET translation = ?1 WHERE id = ?2",
@@ -1588,6 +1718,19 @@ fn translate_article(
     .map_err(|e| format!("Failed to save translation: {e}"))?;
 
     Ok(translation)
+}
+
+#[tauri::command]
+fn translate_text(app: AppHandle, text: String, target_lang: String) -> Result<String, String> {
+    let normalized = normalize_optional_text(Some(text))
+        .ok_or_else(|| "Selected text cannot be empty".to_string())?;
+    if normalized.chars().count() > 3000 {
+        return Err("Selected text is too long. Please choose a shorter passage.".to_string());
+    }
+
+    let conn = open_database(&app)?;
+    let config = get_llm_config_from_db(&conn)?;
+    translate_text_with_config(&config, &normalized, &target_lang)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1621,6 +1764,7 @@ pub fn run() {
             get_llm_config,
             summarize_article,
             translate_article,
+            translate_text,
             clean_article,
             fetch_and_clean_article,
             opml::import_opml,

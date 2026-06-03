@@ -78,3 +78,17 @@ export type Article = {
   isFavorite: boolean;
   readLater: boolean;
 };
+
+export type Annotation = {
+  id: string;
+  articleId: string;
+  kind: "highlight" | "note";
+  selectedText: string | null;
+  prefixText: string | null;
+  suffixText: string | null;
+  startOffset: number | null;
+  endOffset: number | null;
+  noteText: string | null;
+  createdAt: string;
+  updatedAt: string;
+};

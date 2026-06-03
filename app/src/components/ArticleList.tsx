@@ -2,41 +2,61 @@ import type { Article, ReadFilter } from "../types";
 
 type Props = {
   articles: Article[];
+  totalCount: number;
+  unreadCount: number;
+  readCount: number;
   selectedArticleId: string | null;
   isLoading: boolean;
   readFilter: ReadFilter;
+  searchQuery: string;
   isUpdatingReadStatus: boolean;
   onSelectArticle: (id: string) => void;
   onReadFilterChange: (filter: ReadFilter) => void;
+  onSearchQueryChange: (query: string) => void;
   onToggleReadStatus: (article: Article) => void;
   onMarkCurrentFeedRead: () => void;
 };
 
 export function ArticleList({
   articles,
+  totalCount,
+  unreadCount,
+  readCount,
   selectedArticleId,
   isLoading,
   readFilter,
+  searchQuery,
   isUpdatingReadStatus,
   onSelectArticle,
   onReadFilterChange,
+  onSearchQueryChange,
   onToggleReadStatus,
   onMarkCurrentFeedRead,
 }: Props) {
+  const currentFilterCount =
+    readFilter === "all" ? totalCount : readFilter === "unread" ? unreadCount : readCount;
+  const countLabel = isLoading
+    ? "加载中..."
+    : searchQuery.trim()
+      ? `当前 ${articles.length} 篇，筛选范围 ${currentFilterCount} 篇，未读 ${unreadCount} 篇`
+      : readFilter === "all"
+        ? `共 ${totalCount} 篇，未读 ${unreadCount} 篇`
+        : readFilter === "unread"
+          ? `未读 ${unreadCount} 篇`
+          : `已读 ${readCount} 篇`;
+
   return (
     <section className="article-list">
       <div className="toolbar">
         <div>
           <h2>Articles</h2>
-          <p>
-            {isLoading ? "加载中..." : `${articles.length} 篇文章`}
-          </p>
+          <p>{countLabel}</p>
         </div>
         <button
           type="button"
           className="mark-read-button"
           onClick={onMarkCurrentFeedRead}
-          disabled={isUpdatingReadStatus || articles.length === 0}
+          disabled={isUpdatingReadStatus || unreadCount === 0}
         >
           全部标为已读
         </button>
@@ -50,13 +70,21 @@ export function ArticleList({
             className={readFilter === value ? "active" : ""}
             onClick={() => onReadFilterChange(value)}
           >
-            {value === "all" ? "全部" : value === "unread" ? "未读" : "已读"}
+            {value === "all"
+              ? `全部 ${totalCount}`
+              : value === "unread"
+                ? `未读 ${unreadCount}`
+                : `已读 ${readCount}`}
           </button>
         ))}
       </div>
 
       <div className="search-box">
-        <input placeholder="搜索文章..." />
+        <input
+          value={searchQuery}
+          onChange={(event) => onSearchQueryChange(event.target.value)}
+          placeholder="搜索标题、作者..."
+        />
       </div>
 
       <div className="cards">

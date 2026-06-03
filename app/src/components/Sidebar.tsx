@@ -4,6 +4,8 @@ import type { Article, Feed, SyncStatus, SyncReport, SyncConfig } from "../types
 
 type Props = {
   feeds: Feed[];
+  allArticleCount: number;
+  allUnreadCount: number;
   selectedFeedId: string;
   syncStatus: SyncStatus | null;
   onSelectFeed: (id: string) => void;
@@ -13,6 +15,8 @@ type Props = {
 
 export function Sidebar({
   feeds,
+  allArticleCount,
+  allUnreadCount,
   selectedFeedId,
   syncStatus,
   onSelectFeed,
@@ -168,12 +172,13 @@ export function Sidebar({
     }
   }
 
-  const allFeed: Feed = {
+  const allFeed = {
     id: "all",
     title: "全部订阅",
     url: "",
     siteUrl: null,
-    unread: feeds.reduce((sum, feed) => sum + feed.unread, 0),
+    unread: allUnreadCount,
+    total: allArticleCount,
     lastSyncAt: null,
   };
 
@@ -283,7 +288,15 @@ export function Sidebar({
                     &#8635;
                   </button>
                 )}
-                {feed.unread > 0 && <span className="badge">{feed.unread}</span>}
+                {feed.id === "all" ? (
+                  <span className="badge badge-double" title={`未读 ${allFeed.unread} 篇，共 ${allFeed.total} 篇`}>
+                    <span>{allFeed.unread}</span>
+                    <span className="badge-divider">/</span>
+                    <span>{allFeed.total}</span>
+                  </span>
+                ) : (
+                  feed.unread > 0 && <span className="badge">{feed.unread}</span>
+                )}
               </span>
             </div>
           ))}
