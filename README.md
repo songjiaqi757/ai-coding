@@ -246,23 +246,15 @@ npm run tauri dev
 说明：
 
 - 当前工作流面向 **macOS + Windows**；
-- macOS 安装包现在按 **Apple Developer ID 签名 + notarization** 流程准备；
+- macOS 安装包当前为普通构建产物；
 - Windows 安装包如需减少安全提示，后续可补充代码签名。
-
-若要生成 **下载后可直接打开** 的 macOS 安装包，需要在 GitHub 仓库 `Settings > Secrets and variables > Actions` 中配置以下 secrets：
-
-- `APPLE_CERTIFICATE`：导出后的 `Developer ID Application` 证书 `.p12` 文件内容，使用 Base64 编码后保存；
-- `APPLE_CERTIFICATE_PASSWORD`：导出该 `.p12` 文件时设置的密码；
-- `APPLE_ID`：用于 notarization 的 Apple ID；
-- `APPLE_PASSWORD`：该 Apple ID 的 app-specific password；
-- `APPLE_TEAM_ID`：Apple Developer Team ID；
-- `KEYCHAIN_PASSWORD`：GitHub Actions 临时 keychain 使用的自定义密码。
 
 说明：
 
-- 如果缺少上述任意一个 secret，macOS 发布任务会直接失败，并提示缺失项；
-- Windows 构建不依赖这些 Apple secrets；
-- 当前工作流未接入 Windows 代码签名，因此 Windows 包仍可能显示系统安全提示。
+- 当前工作流不依赖 Apple Developer secrets；
+- Windows 构建不依赖额外签名配置；
+- 当前工作流未接入 Windows 代码签名，因此 Windows 包仍可能显示系统安全提示；
+- macOS 普通构建产物在其他机器上可能仍会被 Gatekeeper 拦截，这属于系统安全策略，不是构建失败。
 
 首次运行会编译 Rust 依赖，耗时较长（约 5-10 分钟）。后续启动会快很多。运行成功后自动打开 Mercury 桌面应用窗口。
 
