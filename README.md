@@ -220,28 +220,28 @@ npm install
 npm run tauri dev
 ~~~
 
-## 九、GitHub Actions 打包发布
+## 九、GitHub Actions 内测构建
 
-仓库现在已配置 GitHub Actions 自动构建桌面安装包：
+仓库现在已配置 GitHub Actions 自动构建桌面测试包：
 
 - macOS；
 - Windows。
 
 工作流文件位于：
 
-- `.github/workflows/release.yml`
+- `.github/workflows/internal-build.yml`
 
 触发方式：
 
-1. 在 GitHub Actions 页面手动运行 `Release Desktop App`；
-2. 或推送形如 `v0.1.0` 的 tag。
+1. 在 GitHub Actions 页面手动运行 `Internal Test Build`；
+2. 或推送到 `main` 分支。
 
 工作流会：
 
 - 在 `macos-latest` 和 `windows-latest` 上分别构建；
 - 执行 `npm ci`；
 - 执行 Tauri bundle；
-- 将产物上传到 GitHub Release。
+- 将产物上传到当前 Actions 运行记录的 `Artifacts` 区域。
 
 说明：
 
@@ -254,7 +254,8 @@ npm run tauri dev
 - 当前工作流不依赖 Apple Developer secrets；
 - Windows 构建不依赖额外签名配置；
 - 当前工作流未接入 Windows 代码签名，因此 Windows 包仍可能显示系统安全提示；
-- macOS 普通构建产物在其他机器上可能仍会被 Gatekeeper 拦截，这属于系统安全策略，不是构建失败。
+- macOS 普通构建产物在其他机器上可能仍会被 Gatekeeper 拦截，这属于系统安全策略，不是构建失败；
+- 这套流程更适合课程小组、团队成员之间下载同一版本进行测试，不面向正式公开发行。
 
 首次运行会编译 Rust 依赖，耗时较长（约 5-10 分钟）。后续启动会快很多。运行成功后自动打开 Mercury 桌面应用窗口。
 
