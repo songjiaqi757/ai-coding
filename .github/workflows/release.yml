@@ -54,6 +54,6 @@ jobs:
           releaseBody: "See the assets to download the Mercury desktop app for macOS and Windows."
           releaseDraft: false
           prerelease: false
-          uploadDraftAssets: true
           includeUpdaterJson: false
+          tauriScript: npm run tauri
           args: ${{ matrix.args }}
