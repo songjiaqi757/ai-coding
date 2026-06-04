@@ -903,18 +903,36 @@ async fn run_node_cleaner(
             }
         };
 
-        let mut stdin = child
+        let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| "Failed to open stdin for Node article cleaner".to_string())?;
-        stdin
-            .write_all(&payload)
-            .map_err(|error| format!("Failed to send HTML to Node article cleaner: {error}"))?;
+            .ok_or_else(|| "Failed to open stdin for Node article cleaner".to_string());
+        let mut stdin = match stdin {
+            Ok(stdin) => stdin,
+            Err(_) => {
+                return Ok(CleanerRunResult {
+                    output: fallback_output.clone(),
+                    version: FALLBACK_CLEANER_VERSION,
+                })
+            }
+        };
+        if stdin.write_all(&payload).is_err() {
+            return Ok(CleanerRunResult {
+                output: fallback_output.clone(),
+                version: FALLBACK_CLEANER_VERSION,
+            });
+        }
         drop(stdin);
 
-        let output = child
-            .wait_with_output()
-            .map_err(|error| format!("Failed to wait for Node article cleaner: {error}"))?;
+        let output = match child.wait_with_output() {
+            Ok(output) => output,
+            Err(_) => {
+                return Ok(CleanerRunResult {
+                    output: fallback_output.clone(),
+                    version: FALLBACK_CLEANER_VERSION,
+                })
+            }
+        };
 
         if !output.status.success() {
             return Ok(CleanerRunResult {
