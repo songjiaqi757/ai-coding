@@ -51,6 +51,7 @@ pub struct Article {
     pub final_url: Option<String>,
     pub summary: Option<String>,
     pub translation: Option<String>,
+    pub translation_lang: Option<String>,
     pub is_read: bool,
     pub is_favorite: bool,
     pub read_later: bool,
@@ -185,6 +186,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             read_status          INTEGER NOT NULL DEFAULT 0,
             summary              TEXT,
             translation          TEXT,
+            translation_lang     TEXT,
             is_favorite          INTEGER NOT NULL DEFAULT 0,
             read_later           INTEGER NOT NULL DEFAULT 0,
             created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -244,6 +246,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE articles ADD COLUMN final_url TEXT",
         "ALTER TABLE articles ADD COLUMN summary TEXT",
         "ALTER TABLE articles ADD COLUMN translation TEXT",
+        "ALTER TABLE articles ADD COLUMN translation_lang TEXT",
         "ALTER TABLE articles ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE articles ADD COLUMN read_later INTEGER NOT NULL DEFAULT 0",
     ];
@@ -573,8 +576,9 @@ fn article_from_row(row: &Row<'_>) -> rusqlite::Result<Article> {
         final_url: row.get(15)?,
         summary: row.get(16)?,
         translation: row.get(17)?,
-        is_favorite: row.get(18)?,
-        read_later: row.get(19)?,
+        translation_lang: row.get(18)?,
+        is_favorite: row.get(19)?,
+        read_later: row.get(20)?,
     })
 }
 
@@ -983,7 +987,7 @@ fn load_article_by_id(conn: &Connection, article_id: &str) -> Result<Article, St
         "SELECT id, feed_id, title, url, author, published_at, excerpt, content,
                 read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
                   content_fetch_status, content_fetch_error, final_url, summary, translation,
-                  is_favorite, read_later
+                  translation_lang, is_favorite, read_later
          FROM articles
          WHERE id = ?1",
         params![article_id],
@@ -1127,7 +1131,7 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>, read_filter: 
                 "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
                         read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
                          content_fetch_status, content_fetch_error, final_url, summary, translation,
-                         is_favorite, read_later
+                         translation_lang, is_favorite, read_later
                  FROM articles
                  WHERE feed_id = ?1{filter_sql}
                  ORDER BY published_at DESC, created_at DESC"
@@ -1138,7 +1142,7 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>, read_filter: 
                 "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
                         read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
                          content_fetch_status, content_fetch_error, final_url, summary, translation,
-                         is_favorite, read_later
+                         translation_lang, is_favorite, read_later
                  FROM articles
                  WHERE 1 = 1{filter_sql}
                  ORDER BY published_at DESC, created_at DESC"
@@ -1361,7 +1365,7 @@ fn search_articles(
             "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
                     read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
                     content_fetch_status, content_fetch_error, final_url, summary, translation,
-                    is_favorite, read_later
+                    translation_lang, is_favorite, read_later
              FROM articles
              WHERE (?1 IS NULL OR ?1 = '' OR feed_id = ?1)
                AND (
@@ -1855,18 +1859,20 @@ fn translate_article(
 ) -> Result<String, String> {
     let conn = open_database(&app)?;
 
-    let cached: Option<String> = conn
+    let cached: Option<(Option<String>, Option<String>)> = conn
         .query_row(
-            "SELECT translation FROM articles WHERE id = ?1",
+            "SELECT translation, translation_lang FROM articles WHERE id = ?1",
             params![article_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .ok()
-        .flatten();
+        .ok();
 
-    if let Some(ref s) = cached {
-        if !s.is_empty() && !is_invalid_ai_result(s) {
-            return Ok(s.clone());
+    if let Some((Some(translation), cached_lang)) = cached {
+        if !translation.is_empty()
+            && !is_invalid_ai_result(&translation)
+            && cached_lang.as_deref() == Some(target_lang.as_str())
+        {
+            return Ok(translation);
         }
     }
 
@@ -1875,8 +1881,8 @@ fn translate_article(
     let translation = translate_text_with_config(&config, &article_text, &target_lang)?;
 
     conn.execute(
-        "UPDATE articles SET translation = ?1 WHERE id = ?2",
-        params![translation, article_id],
+        "UPDATE articles SET translation = ?1, translation_lang = ?2 WHERE id = ?3",
+        params![translation, target_lang, article_id],
     )
     .map_err(|e| format!("Failed to save translation: {e}"))?;
 

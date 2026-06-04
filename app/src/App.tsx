@@ -228,10 +228,10 @@ function App() {
         targetLang,
       });
       setArticles((prev) =>
-        prev.map((a) => (a.id === selectedArticle.id ? { ...a, translation } : a)),
+        prev.map((a) => (a.id === selectedArticle.id ? { ...a, translation, translationLang: targetLang } : a)),
       );
       if (readerArticle?.id === selectedArticle.id) {
-        setReaderArticle({ ...selectedArticle, translation });
+        setReaderArticle({ ...selectedArticle, translation, translationLang: targetLang });
       }
       setReadView("translation");
     } catch (error) {
@@ -332,11 +332,13 @@ function App() {
     };
   }, [selectedArticle]);
 
+  const hasActiveTranslation = !!selectedArticle?.translation && selectedArticle.translationLang === targetLang;
+
   useEffect(() => {
-    if (!selectedArticle?.translation && readView !== "original") {
+    if (!hasActiveTranslation && readView !== "original") {
       setReadView("original");
     }
-  }, [readView, selectedArticle?.translation]);
+  }, [hasActiveTranslation, readView]);
 
   useEffect(() => {
     setReaderArticle(null);
@@ -666,8 +668,8 @@ function App() {
                     type="button"
                     className={readView === "translation" ? "view-tab active" : "view-tab"}
                     onClick={() => setReadView("translation")}
-                    disabled={!selectedArticle.translation}
-                    title={selectedArticle.translation ? "Show translation only" : "请先生成翻译"}
+                    disabled={!hasActiveTranslation}
+                    title={hasActiveTranslation ? "Show translation only" : "请先生成当前语言译文"}
                   >
                     Translation
                   </button>
@@ -675,14 +677,14 @@ function App() {
                     type="button"
                     className={readView === "bilingual" ? "view-tab active" : "view-tab"}
                     onClick={() => setReadView("bilingual")}
-                    disabled={!selectedArticle.translation}
-                    title={selectedArticle.translation ? "Show original and translation" : "请先生成翻译"}
+                    disabled={!hasActiveTranslation}
+                    title={hasActiveTranslation ? "Show original and translation" : "请先生成当前语言译文"}
                   >
                     Bilingual
                   </button>
                 </div>
-                {!selectedArticle.translation && (
-                  <div className="view-tabs-hint">请先点击 Translate 生成译文后再切换双语视图。</div>
+                {!hasActiveTranslation && (
+                  <div className="view-tabs-hint">请先点击 Translate 生成当前所选语言的译文后再切换双语视图。</div>
                 )}
               </div>
             )}
@@ -711,7 +713,7 @@ function App() {
                 />
               )}
 
-              {(readView === "translation" || readView === "bilingual") && selectedArticle?.translation && (
+              {(readView === "translation" || readView === "bilingual") && hasActiveTranslation && selectedArticle?.translation && (
                 <div className="translation-block">
                   <h3>Translation</h3>
                   <p>{selectedArticle.translation}</p>

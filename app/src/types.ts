@@ -74,6 +74,7 @@ export type Article = {
   finalUrl: string | null;
   summary: string | null;
   translation: string | null;
+  translationLang: string | null;
   isRead: boolean;
   isFavorite: boolean;
   readLater: boolean;
