@@ -129,26 +129,21 @@ pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
 
     init_schema(&conn)?;
 
-    // LLM default settings — always run so provider config stays in sync
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        params!["llm_base_url", "https://chat.ecnu.edu.cn/open/api"],
-    )
-    .map_err(|error| format!("Failed to seed llm_base_url: {error}"))?;
-
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        params!["llm_api_key", "sk-8ff670c62b634986aa98669c1444911b"],
-    )
-    .map_err(|error| format!("Failed to seed llm_api_key: {error}"))?;
-
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        params!["llm_model_name", "ecnu-plus"],
-    )
-    .map_err(|error| format!("Failed to seed llm_model_name: {error}"))?;
+    // Seed non-sensitive defaults once, without overwriting the user's local settings.
+    seed_setting_if_missing(&conn, "llm_base_url", "https://chat.ecnu.edu.cn/open/api")?;
+    seed_setting_if_missing(&conn, "llm_model_name", "ecnu-plus")?;
 
     Ok(conn)
+}
+
+fn seed_setting_if_missing(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO NOTHING",
+        params![key, value],
+    )
+    .map_err(|error| format!("Failed to seed setting '{key}': {error}"))?;
+    Ok(())
 }
 
 fn init_schema(conn: &Connection) -> Result<(), String> {
