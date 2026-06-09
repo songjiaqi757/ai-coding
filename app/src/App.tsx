@@ -142,9 +142,50 @@ function App() {
     }
   }
 
+  async function handleToggleFavorite(article: Article) {
+    try {
+      setErrorMessage(null);
+      const updated = await invoke<Article>("set_article_favorite", {
+        articleId: article.id,
+        isFavorite: !article.isFavorite,
+      });
+      setArticles((prev) =>
+        prev.map((item) =>
+          item.id === updated.id ? { ...item, ...updated } : item,
+        ),
+      );
+      if (readerArticle?.id === updated.id) {
+        setReaderArticle((current) => current ? { ...current, ...updated } : current);
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function handleToggleReadLater(article: Article) {
+    try {
+      setErrorMessage(null);
+      const updated = await invoke<Article>("set_article_read_later", {
+        articleId: article.id,
+        readLater: !article.readLater,
+      });
+      setArticles((prev) =>
+        prev.map((item) =>
+          item.id === updated.id ? { ...item, ...updated } : item,
+        ),
+      );
+      if (readerArticle?.id === updated.id) {
+        setReaderArticle((current) => current ? { ...current, ...updated } : current);
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function handleMarkCurrentFeedRead() {
     try {
       setIsUpdatingReadStatus(true);
+      setErrorMessage(null);
       await invoke<UnreadSummary>("mark_articles_read", {
         feedId: selectedFeedId === "all" ? null : selectedFeedId,
         articleIds: null,
@@ -557,6 +598,8 @@ function App() {
         onReadFilterChange={setReadFilter}
         onSearchQueryChange={setSearchQuery}
         onToggleReadStatus={handleToggleReadStatus}
+        onToggleFavorite={handleToggleFavorite}
+        onToggleReadLater={handleToggleReadLater}
         onMarkCurrentFeedRead={handleMarkCurrentFeedRead}
       />
 

@@ -2,6 +2,9 @@ import { useEffect, useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Article, Feed, SyncStatus, SyncReport, SyncConfig } from "../types";
 
+const SAVED_ARTICLES_FEED_ID = "saved";
+const SAVED_ARTICLES_FEED_URL = "mercury://saved-articles";
+
 type Props = {
   feeds: Feed[];
   allArticleCount: number;
@@ -31,7 +34,9 @@ export function Sidebar({
   const [opmlStatus, setOpmlStatus] = useState<string | null>(null);
   const [opmlError, setOpmlError] = useState<string | null>(null);
   const [refreshingFeedId, setRefreshingFeedId] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [showSyncConfig, setShowSyncConfig] = useState(false);
   const [syncConfig, setSyncConfig] = useState<SyncConfig>({
     enabled: false,
@@ -93,12 +98,22 @@ export function Sidebar({
 
   async function handleRefreshFeed(feedId: string, event: MouseEvent) {
     event.stopPropagation();
+    const feed = feeds.find((item) => item.id === feedId);
+    if (isLocalSavedFeed(feed)) {
+      setRefreshError("Saved Articles 是本地列表，不会远程刷新。");
+      return;
+    }
     setRefreshingFeedId(feedId);
+    setRefreshError(null);
     try {
       await invoke<Article[]>("refresh_feed", { feedId });
       onFeedsChange();
     } catch (error) {
-      console.error("刷新失败", error);
+      const message =
+        typeof error === "string" || error instanceof Error
+          ? error.toString()
+          : "刷新失败";
+      setRefreshError(message);
     } finally {
       setRefreshingFeedId(null);
     }
@@ -106,24 +121,34 @@ export function Sidebar({
 
   async function handleStartSync() {
     setIsSyncing(true);
+    setSyncError(null);
     try {
       await invoke<SyncReport>("start_sync", { feedId: null });
       onSyncStatusChange();
       onFeedsChange();
     } catch (error) {
-      console.error("同步失败", error);
+      const message =
+        typeof error === "string" || error instanceof Error
+          ? error.toString()
+          : "同步失败";
+      setSyncError(message);
     } finally {
       setIsSyncing(false);
     }
   }
 
   async function handleRetryFailed() {
+    setSyncError(null);
     try {
       await invoke<SyncReport>("retry_failed_syncs");
       onSyncStatusChange();
       onFeedsChange();
     } catch (error) {
-      console.error("重试失败", error);
+      const message =
+        typeof error === "string" || error instanceof Error
+          ? error.toString()
+          : "重试失败";
+      setSyncError(message);
     }
   }
 
@@ -184,6 +209,10 @@ export function Sidebar({
 
   const failedCount = syncStatus?.failedFeeds.length ?? 0;
   const isRunning = syncStatus?.phase === "running" || isSyncing;
+
+  function isLocalSavedFeed(feed: Pick<Feed, "id" | "url"> | undefined) {
+    return feed?.id === SAVED_ARTICLES_FEED_ID || feed?.url === SAVED_ARTICLES_FEED_URL;
+  }
 
   return (
     <aside className="sidebar">
@@ -247,6 +276,12 @@ export function Sidebar({
           </div>
         )}
 
+        {(refreshError || syncError) && (
+          <div className="sync-failed-bar">
+            <span>{refreshError ?? syncError}</span>
+          </div>
+        )}
+
         {(opmlStatus || opmlError) && (
           <div className={opmlError ? "opml-status error" : "opml-status"}>
             {opmlError ?? opmlStatus}
@@ -275,7 +310,7 @@ export function Sidebar({
                 {feed.title}
               </button>
               <span className="feed-right">
-                {feed.id !== "all" && (
+                {feed.id !== "all" && !isLocalSavedFeed(feed) && (
                   <button
                     className={
                       refreshingFeedId === feed.id

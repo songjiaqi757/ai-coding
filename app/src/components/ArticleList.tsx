@@ -14,6 +14,8 @@ type Props = {
   onReadFilterChange: (filter: ReadFilter) => void;
   onSearchQueryChange: (query: string) => void;
   onToggleReadStatus: (article: Article) => void;
+  onToggleFavorite: (article: Article) => void;
+  onToggleReadLater: (article: Article) => void;
   onMarkCurrentFeedRead: () => void;
 };
 
@@ -31,6 +33,8 @@ export function ArticleList({
   onReadFilterChange,
   onSearchQueryChange,
   onToggleReadStatus,
+  onToggleFavorite,
+  onToggleReadLater,
   onMarkCurrentFeedRead,
 }: Props) {
   const currentFilterCount =
@@ -137,6 +141,30 @@ export function ArticleList({
               <span className="article-card-title">{article.title}</span>
               <span className="article-card-excerpt">{article.excerpt}</span>
             </button>
+            <div className="article-state-actions">
+              <button
+                type="button"
+                className={article.isFavorite ? "state-pill active" : "state-pill"}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleFavorite(article);
+                }}
+                title={article.isFavorite ? "取消收藏" : "收藏文章"}
+              >
+                {article.isFavorite ? "已收藏" : "收藏"}
+              </button>
+              <button
+                type="button"
+                className={article.readLater ? "state-pill active" : "state-pill"}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleReadLater(article);
+                }}
+                title={article.readLater ? "取消稍后读" : "稍后读"}
+              >
+                {article.readLater ? "稍后读中" : "稍后读"}
+              </button>
+            </div>
           </article>
         ))}
       </div>

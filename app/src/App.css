@@ -376,6 +376,37 @@ button {
   overflow-wrap: anywhere;
 }
 
+.article-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.state-pill {
+  flex-shrink: 0;
+  padding: 5px 10px;
+  border: 1px solid #d0d7e2;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.state-pill:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.state-pill.active {
+  border-color: #1f6feb;
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
 .read-toggle {
   flex-shrink: 0;
   padding: 5px 12px;
