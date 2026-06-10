@@ -90,6 +90,8 @@ export type Annotation = {
   startOffset: number | null;
   endOffset: number | null;
   noteText: string | null;
+  highlightColor: string | null;
+  highlightStyle: "background" | "text" | "underline" | null;
   createdAt: string;
   updatedAt: string;
 };

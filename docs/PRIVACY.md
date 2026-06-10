@@ -10,6 +10,7 @@
 - OPML 导出只读取本地 SQLite 中的订阅源信息，并写入用户选择的本地文件。
 - 用户主动输入文章 URL 并点击抓取时，应用会访问该 URL 获取网页 HTML。
 - 抓取到的 raw_html、cleaned_html、cleaned_markdown 默认保存到本地 SQLite。
+- 用户创建的文章笔记、高亮文本、高亮颜色和高亮样式默认保存到本地 SQLite。
 - Feed / OPML / 刷新阶段只访问用户添加或导入的 Feed URL。
 - 用户打开订阅文章时，应用会访问该文章 URL 获取网页 HTML，并在本地完成清洗后展示 cleaned_html。
 - 文章原网页正文只在用户主动打开订阅文章、点击清洗或点击抓取时访问。

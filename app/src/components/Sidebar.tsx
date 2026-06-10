@@ -6,6 +6,8 @@ type Props = {
   feeds: Feed[];
   allArticleCount: number;
   allUnreadCount: number;
+  favoriteCount: number;
+  readLaterCount: number;
   selectedFeedId: string;
   syncStatus: SyncStatus | null;
   onSelectFeed: (id: string) => void;
@@ -17,6 +19,8 @@ export function Sidebar({
   feeds,
   allArticleCount,
   allUnreadCount,
+  favoriteCount,
+  readLaterCount,
   selectedFeedId,
   syncStatus,
   onSelectFeed,
@@ -181,6 +185,26 @@ export function Sidebar({
     total: allArticleCount,
     lastSyncAt: null,
   };
+  const smartFeeds = [
+    {
+      id: "favorites",
+      title: "Favorites",
+      url: "",
+      siteUrl: null,
+      unread: favoriteCount,
+      total: favoriteCount,
+      lastSyncAt: null,
+    },
+    {
+      id: "read-later",
+      title: "Read Later",
+      url: "",
+      siteUrl: null,
+      unread: readLaterCount,
+      total: readLaterCount,
+      lastSyncAt: null,
+    },
+  ];
 
   const failedCount = syncStatus?.failedFeeds.length ?? 0;
   const isRunning = syncStatus?.phase === "running" || isSyncing;
@@ -254,7 +278,7 @@ export function Sidebar({
         )}
 
         <div className="feed-list">
-          {[allFeed, ...feeds].map((feed) => (
+          {[allFeed, ...smartFeeds, ...feeds].map((feed) => (
             <div
               key={feed.id}
               className={
@@ -275,7 +299,7 @@ export function Sidebar({
                 {feed.title}
               </button>
               <span className="feed-right">
-                {feed.id !== "all" && (
+                {!["all", "favorites", "read-later"].includes(feed.id) && (
                   <button
                     className={
                       refreshingFeedId === feed.id

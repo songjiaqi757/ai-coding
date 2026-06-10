@@ -73,6 +73,7 @@ pub struct UnreadSummary {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Annotation {
     id: String,
     article_id: String,
@@ -83,6 +84,8 @@ struct Annotation {
     start_offset: Option<i64>,
     end_offset: Option<i64>,
     note_text: Option<String>,
+    highlight_color: Option<String>,
+    highlight_style: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -214,6 +217,8 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             start_offset INTEGER,
             end_offset INTEGER,
             note_text TEXT,
+            highlight_color TEXT,
+            highlight_style TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE
@@ -244,6 +249,8 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE articles ADD COLUMN translation_lang TEXT",
         "ALTER TABLE articles ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE articles ADD COLUMN read_later INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE annotations ADD COLUMN highlight_color TEXT",
+        "ALTER TABLE annotations ADD COLUMN highlight_style TEXT",
     ];
 
     for sql in &migrations {
@@ -1207,15 +1214,18 @@ fn annotation_from_row(row: &Row<'_>) -> rusqlite::Result<Annotation> {
         start_offset: row.get(6)?,
         end_offset: row.get(7)?,
         note_text: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        highlight_color: row.get(9)?,
+        highlight_style: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
 fn load_annotation_by_id(conn: &Connection, annotation_id: &str) -> Result<Annotation, String> {
     conn.query_row(
         "SELECT id, article_id, kind, selected_text, prefix_text, suffix_text,
-                start_offset, end_offset, note_text, created_at, updated_at
+                start_offset, end_offset, note_text, highlight_color, highlight_style,
+                created_at, updated_at
          FROM annotations
          WHERE id = ?1",
         [annotation_id],
@@ -1270,7 +1280,8 @@ fn list_annotations(app: AppHandle, article_id: String) -> Result<Vec<Annotation
     let mut stmt = conn
         .prepare(
             "SELECT id, article_id, kind, selected_text, prefix_text, suffix_text,
-                    start_offset, end_offset, note_text, created_at, updated_at
+                    start_offset, end_offset, note_text, highlight_color, highlight_style,
+                    created_at, updated_at
              FROM annotations
              WHERE article_id = ?1
              ORDER BY created_at ASC",
@@ -1294,6 +1305,8 @@ fn create_annotation(
     start_offset: Option<i64>,
     end_offset: Option<i64>,
     note_text: Option<String>,
+    highlight_color: Option<String>,
+    highlight_style: Option<String>,
 ) -> Result<Annotation, String> {
     if kind != "highlight" && kind != "note" {
         return Err("Annotation kind must be highlight or note".to_string());
@@ -1311,8 +1324,8 @@ fn create_annotation(
     conn.execute(
         "INSERT INTO annotations (
             id, article_id, kind, selected_text, prefix_text, suffix_text,
-            start_offset, end_offset, note_text
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            start_offset, end_offset, note_text, highlight_color, highlight_style
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             annotation_id,
             article_id,
@@ -1322,7 +1335,9 @@ fn create_annotation(
             normalize_optional_text(suffix_text),
             start_offset,
             end_offset,
-            normalize_optional_text(note_text)
+            normalize_optional_text(note_text),
+            normalize_optional_text(highlight_color),
+            normalize_optional_text(highlight_style)
         ],
     )
     .map_err(|error| format!("Failed to create annotation: {error}"))?;
