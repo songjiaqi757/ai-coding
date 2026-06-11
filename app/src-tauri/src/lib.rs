@@ -7,6 +7,7 @@ use llm_provider::LlmConfig;
 use reqwest::{header::CONTENT_TYPE, Client, Url};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -478,15 +479,17 @@ pub fn save_articles(
 ) -> Result<usize, String> {
     let mut saved = 0;
     let has_legacy_source_column = table_has_column(conn, "articles", "source")?;
+    let mut dedupe_state = ArticleDedupeState::load(conn, feed_id)?;
+    dedupe_state.cleanup_existing(conn)?;
 
     for entry in entries {
         let url = match select_article_url(&entry) {
             Some(url) => url,
             None => continue,
         };
+        let canonical_url = canonicalize_article_url(&url);
 
-        let article_id = Uuid::new_v4().to_string();
-        let guid = Some(entry.id.clone());
+        let guid = normalize_entry_guid(&entry.id);
         let title = entry
             .title
             .map(|title| title.content)
@@ -506,6 +509,28 @@ pub fn save_articles(
             })
             .unwrap_or_default();
         let content = entry.content.and_then(|content| content.body).unwrap_or_default();
+        let title_published_key = article_title_published_key(&title, published_at.as_deref());
+
+        if let Some(existing_id) =
+            dedupe_state.find_existing(guid.as_deref(), &canonical_url, title_published_key.as_deref())
+        {
+            update_existing_article_from_feed(
+                conn,
+                has_legacy_source_column,
+                existing_id,
+                &canonical_url,
+                guid.as_deref(),
+                &title,
+                author.as_deref(),
+                published_at.as_deref(),
+                &published_at_for_legacy,
+                &excerpt,
+                &content,
+            )?;
+            continue;
+        }
+
+        let article_id = Uuid::new_v4().to_string();
 
         let inserted = if has_legacy_source_column {
             conn.execute(
@@ -516,11 +541,11 @@ pub fn save_articles(
                     article_id,
                     feed_id,
                     title,
-                    url,
+                    canonical_url,
                     published_at_for_legacy,
                     excerpt,
                     content,
-                    url,
+                    canonical_url,
                     guid,
                     author
                 ],
@@ -534,7 +559,7 @@ pub fn save_articles(
                     article_id,
                     feed_id,
                     title,
-                    url,
+                    canonical_url,
                     guid,
                     author,
                     published_at,
@@ -547,10 +572,266 @@ pub fn save_articles(
 
         if inserted == 1 {
             saved += 1;
+            dedupe_state.remember(article_id, guid, canonical_url, title_published_key);
         }
     }
 
     Ok(saved)
+}
+
+#[derive(Clone)]
+struct ExistingArticleRecord {
+    id: String,
+    guid: Option<String>,
+    url: String,
+    title: String,
+    published_at: Option<String>,
+    is_read: bool,
+    is_favorite: bool,
+    read_later: bool,
+}
+
+struct ArticleDedupeState {
+    records: Vec<ExistingArticleRecord>,
+    by_guid: HashMap<String, String>,
+    by_url: HashMap<String, String>,
+    by_title_published: HashMap<String, String>,
+}
+
+impl ArticleDedupeState {
+    fn load(conn: &Connection, feed_id: &str) -> Result<Self, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, guid, url, title, published_at, read_status, is_favorite, read_later
+                 FROM articles
+                 WHERE feed_id = ?1
+                 ORDER BY created_at ASC, id ASC",
+            )
+            .map_err(|error| format!("Failed to prepare article dedupe query: {error}"))?;
+
+        let records = stmt
+            .query_map(params![feed_id], |row| {
+                let read_status: i64 = row.get(5)?;
+                let is_favorite: i64 = row.get(6)?;
+                let read_later: i64 = row.get(7)?;
+                Ok(ExistingArticleRecord {
+                    id: row.get(0)?,
+                    guid: row.get(1)?,
+                    url: row.get(2)?,
+                    title: row.get(3)?,
+                    published_at: row.get(4)?,
+                    is_read: read_status != 0,
+                    is_favorite: is_favorite != 0,
+                    read_later: read_later != 0,
+                })
+            })
+            .map_err(|error| format!("Failed to query existing articles: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to collect existing articles: {error}"))?;
+
+        Ok(Self {
+            records,
+            by_guid: HashMap::new(),
+            by_url: HashMap::new(),
+            by_title_published: HashMap::new(),
+        })
+    }
+
+    fn cleanup_existing(&mut self, conn: &Connection) -> Result<(), String> {
+        let mut keepers: HashMap<String, ExistingArticleRecord> = HashMap::new();
+        self.by_guid.clear();
+        self.by_url.clear();
+        self.by_title_published.clear();
+
+        for record in self.records.clone() {
+            let guid_key = record.guid.as_deref().and_then(normalize_entry_guid);
+            let url_key = canonicalize_article_url(&record.url);
+            let title_key = article_title_published_key(&record.title, record.published_at.as_deref());
+
+            let keeper_id = guid_key
+                .as_ref()
+                .and_then(|key| self.by_guid.get(key).cloned())
+                .or_else(|| self.by_url.get(&url_key).cloned())
+                .or_else(|| title_key.as_ref().and_then(|key| self.by_title_published.get(key).cloned()));
+
+            if let Some(keeper_id) = keeper_id {
+                if let Some(keeper) = keepers.get_mut(&keeper_id) {
+                    merge_duplicate_article(conn, keeper, &record)?;
+                }
+                continue;
+            }
+
+            self.remember(record.id.clone(), guid_key, url_key, title_key);
+            keepers.insert(record.id.clone(), record);
+        }
+
+        self.records = keepers.into_values().collect();
+        Ok(())
+    }
+
+    fn find_existing(&self, guid: Option<&str>, canonical_url: &str, title_key: Option<&str>) -> Option<&String> {
+        guid.and_then(|value| self.by_guid.get(value))
+            .or_else(|| self.by_url.get(canonical_url))
+            .or_else(|| title_key.and_then(|value| self.by_title_published.get(value)))
+    }
+
+    fn remember(
+        &mut self,
+        article_id: String,
+        guid: Option<String>,
+        canonical_url: String,
+        title_key: Option<String>,
+    ) {
+        if let Some(guid) = guid {
+            self.by_guid.insert(guid, article_id.clone());
+        }
+        self.by_url.insert(canonical_url, article_id.clone());
+        if let Some(title_key) = title_key {
+            self.by_title_published.insert(title_key, article_id);
+        }
+    }
+}
+
+fn normalize_entry_guid(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn normalize_title_key(value: &str) -> String {
+    collapse_whitespace(value).to_ascii_lowercase()
+}
+
+fn article_title_published_key(title: &str, published_at: Option<&str>) -> Option<String> {
+    let normalized_title = normalize_title_key(title);
+    let published_at = published_at?.trim();
+    (!normalized_title.is_empty() && !published_at.is_empty())
+        .then(|| format!("{normalized_title}::{published_at}"))
+}
+
+fn canonicalize_article_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let Ok(mut parsed) = Url::parse(trimmed) else {
+        return trimmed.trim_end_matches('/').to_string();
+    };
+
+    parsed.set_fragment(None);
+
+    let filtered_query = parsed
+        .query_pairs()
+        .filter(|(key, _)| {
+            let lowercase = key.to_ascii_lowercase();
+            !(lowercase.starts_with("utm_")
+                || lowercase == "fbclid"
+                || lowercase == "gclid"
+                || lowercase == "guccounter"
+                || lowercase == "guce_referrer"
+                || lowercase == "guce_referrer_sig"
+                || lowercase == "ncid"
+                || lowercase == "sr_share")
+        })
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>();
+
+    if filtered_query.is_empty() {
+        parsed.set_query(None);
+    } else {
+        parsed.set_query(Some(&filtered_query.join("&")));
+    }
+
+    parsed.to_string().trim_end_matches('/').to_string()
+}
+
+fn update_existing_article_from_feed(
+    conn: &Connection,
+    has_legacy_source_column: bool,
+    article_id: &str,
+    canonical_url: &str,
+    guid: Option<&str>,
+    title: &str,
+    author: Option<&str>,
+    published_at: Option<&str>,
+    published_at_for_legacy: &str,
+    excerpt: &str,
+    content: &str,
+) -> Result<(), String> {
+    let affected = if has_legacy_source_column {
+        conn.execute(
+            "UPDATE articles
+             SET title = ?1,
+                 source = ?2,
+                 published_at = ?3,
+                 excerpt = ?4,
+                 content = ?5,
+                 url = ?6,
+                 guid = COALESCE(?7, guid),
+                 author = ?8,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?9",
+            params![
+                title,
+                canonical_url,
+                published_at_for_legacy,
+                excerpt,
+                content,
+                canonical_url,
+                guid,
+                author,
+                article_id
+            ],
+        )
+    } else {
+        conn.execute(
+            "UPDATE articles
+             SET title = ?1,
+                 url = ?2,
+                 guid = COALESCE(?3, guid),
+                 author = ?4,
+                 published_at = ?5,
+                 excerpt = ?6,
+                 content = ?7,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?8",
+            params![title, canonical_url, guid, author, published_at, excerpt, content, article_id],
+        )
+    }
+    .map_err(|error| format!("Failed to update existing article: {error}"))?;
+
+    if affected == 0 {
+        return Err("Failed to update existing article: article disappeared".to_string());
+    }
+
+    Ok(())
+}
+
+fn merge_duplicate_article(
+    conn: &Connection,
+    keeper: &mut ExistingArticleRecord,
+    duplicate: &ExistingArticleRecord,
+) -> Result<(), String> {
+    keeper.is_read = keeper.is_read && duplicate.is_read;
+    keeper.is_favorite = keeper.is_favorite || duplicate.is_favorite;
+    keeper.read_later = keeper.read_later || duplicate.read_later;
+
+    conn.execute(
+        "UPDATE articles
+         SET read_status = ?1,
+             is_favorite = ?2,
+             read_later = ?3,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?4",
+        params![
+            if keeper.is_read { 1 } else { 0 },
+            if keeper.is_favorite { 1 } else { 0 },
+            if keeper.read_later { 1 } else { 0 },
+            keeper.id
+        ],
+    )
+    .map_err(|error| format!("Failed to merge duplicate article state: {error}"))?;
+
+    conn.execute("DELETE FROM articles WHERE id = ?1", params![duplicate.id.clone()])
+        .map_err(|error| format!("Failed to remove duplicate article: {error}"))?;
+
+    Ok(())
 }
 
 fn select_article_url(entry: &feed_rs::model::Entry) -> Option<String> {
