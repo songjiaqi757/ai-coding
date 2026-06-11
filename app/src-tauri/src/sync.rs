@@ -83,7 +83,7 @@ struct FeedSyncTarget {
 
 pub async fn sync_one_feed(app: &AppHandle, feed_id: &str) -> Result<i64, String> {
     if feed_id == SAVED_ARTICLES_FEED_ID {
-        return Err("Saved Articles does not have a remote feed URL".to_string());
+        return Err("Internal captured-articles feed does not have a remote feed URL".to_string());
     }
 
     let target = {
@@ -125,7 +125,7 @@ pub async fn start_sync(
         let conn = open_database(&app)?;
         match feed_id.as_deref() {
             Some(SAVED_ARTICLES_FEED_ID) => {
-                return Err("Saved Articles does not have a remote feed URL".to_string());
+                return Err("Internal captured-articles feed does not have a remote feed URL".to_string());
             }
             Some(feed_id) => vec![load_feed_target(&conn, feed_id)?],
             None => load_all_sync_targets(&conn)?,

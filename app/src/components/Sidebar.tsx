@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Article, Feed, SyncStatus, SyncReport, SyncConfig, AppLanguage } from "../types";
 
 const LOCAL_ONLY_FEED_IDS = ["all", "favorites", "read-later", "saved"];
-const SAVED_ARTICLES_FEED_URL = "mercury://saved-articles";
+const SAVED_ARTICLES_FEED_URL = "mercury://internal/captured-articles";
 
 type Props = {
   feeds: Feed[];
@@ -238,6 +238,10 @@ export function Sidebar({
     return LOCAL_ONLY_FEED_IDS.includes(feed.id) || feed.url === SAVED_ARTICLES_FEED_URL;
   }
 
+  function isVisibleFeed(feed: Feed) {
+    return feed.id !== "saved" && feed.url !== SAVED_ARTICLES_FEED_URL;
+  }
+
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -313,7 +317,7 @@ export function Sidebar({
         )}
 
         <div className="feed-list">
-          {[allFeed, favoritesFeed, ...feeds].map((feed) => (
+          {[allFeed, favoritesFeed, ...feeds.filter(isVisibleFeed)].map((feed) => (
             <div
               key={feed.id}
               className={

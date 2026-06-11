@@ -18,7 +18,8 @@ use uuid::Uuid;
 const CLEANER_VERSION: &str = "node-readability-v4";
 const FALLBACK_CLEANER_VERSION: &str = "rust-fallback-v1";
 pub(crate) const SAVED_ARTICLES_FEED_ID: &str = "saved";
-const SAVED_ARTICLES_FEED_URL: &str = "mercury://saved-articles";
+const SAVED_ARTICLES_FEED_TITLE: &str = "__internal_captured_articles";
+const SAVED_ARTICLES_FEED_URL: &str = "mercury://internal/captured-articles";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1301,11 +1302,18 @@ fn save_cleaned_article(
 fn ensure_saved_articles_feed(conn: &Connection) -> Result<(), String> {
     conn.execute(
         "INSERT INTO feeds (id, title, url, site_url, unread)
-         VALUES (?1, 'Saved Articles', ?2, NULL, 0)
-         ON CONFLICT(id) DO NOTHING",
-        params![SAVED_ARTICLES_FEED_ID, SAVED_ARTICLES_FEED_URL],
+         VALUES (?1, ?2, ?3, NULL, 0)
+         ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title,
+            url = excluded.url,
+            updated_at = CURRENT_TIMESTAMP",
+        params![
+            SAVED_ARTICLES_FEED_ID,
+            SAVED_ARTICLES_FEED_TITLE,
+            SAVED_ARTICLES_FEED_URL
+        ],
     )
-    .map_err(|error| format!("Failed to ensure Saved Articles feed: {error}"))?;
+    .map_err(|error| format!("Failed to ensure internal captured-articles feed: {error}"))?;
 
     Ok(())
 }

@@ -46,6 +46,8 @@ type HighlightStyle = "background" | "text" | "underline";
 
 const SMART_FAVORITES = "favorites";
 const SMART_READ_LATER = "read-later";
+const SAVED_ARTICLES_FEED_ID = "saved";
+const SAVED_ARTICLES_FEED_URL = "mercury://internal/captured-articles";
 const HIGHLIGHT_COLORS = ["#ffd400", "#ff5f67", "#58b83d", "#33a6d8", "#9b7de3", "#d85be9", "#f59a32", "#a3a3a3"];
 const DEFAULT_HIGHLIGHT_COLOR = HIGHLIGHT_COLORS[0];
 const DEFAULT_HIGHLIGHT_STYLE: HighlightStyle = "background";
@@ -293,6 +295,16 @@ function normalizeReaderFontScale(value: number | null | undefined) {
   return Math.min(1.4, Math.max(0.8, value));
 }
 
+function isSavedArticlesFeed(feed: Pick<Feed, "id" | "url"> | null | undefined) {
+  if (!feed) return false;
+  return feed.id === SAVED_ARTICLES_FEED_ID || feed.url === SAVED_ARTICLES_FEED_URL;
+}
+
+function isSavedArticlesItem(item: Pick<Article, "feedId"> | null | undefined) {
+  if (!item) return false;
+  return item.feedId === SAVED_ARTICLES_FEED_ID;
+}
+
 function locateHighlights(html: string, annotations: Annotation[], searchQuery: string) {
   const document = new DOMParser().parseFromString(`<body>${html}</body>`, "text/html");
 
@@ -496,12 +508,12 @@ function App() {
         allArticlesPromise,
       ]);
 
-      const allArticles = allArticlesRaw.filter((a) => a.feedId !== "saved");
+      const allArticles = allArticlesRaw.filter((a) => !isSavedArticlesItem(a));
       const nextArticles = listFeedId === null
-        ? nextArticlesRaw.filter((a) => a.feedId !== "saved")
+        ? nextArticlesRaw.filter((a) => !isSavedArticlesItem(a))
         : nextArticlesRaw;
 
-      setFeeds(nextFeeds.filter((f) => f.id !== "saved"));
+      setFeeds(nextFeeds.filter((f) => !isSavedArticlesFeed(f)));
       setArticles(nextArticles);
       setSearchResults(null);
       setActiveSearchQuery("");
