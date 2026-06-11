@@ -1381,17 +1381,22 @@ button {
   z-index: 100;
   display: grid;
   place-items: center;
+  padding: 24px;
   background: rgb(15 23 42 / 40%);
   backdrop-filter: blur(4px);
+  overflow-y: auto;
 }
 
 .modal-content {
   width: 560px;
   max-width: 90vw;
+  max-height: min(88vh, 820px);
   padding: 32px;
   border-radius: 20px;
   background: white;
   box-shadow: 0 24px 60px rgb(15 23 42 / 20%);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .modal-content h2 {
