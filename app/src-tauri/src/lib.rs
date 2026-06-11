@@ -28,6 +28,7 @@ pub struct Feed {
     pub url: String,
     pub site_url: Option<String>,
     pub unread: i64,
+    pub total: i64,
     pub last_sync_at: Option<String>,
 }
 
@@ -50,6 +51,7 @@ pub struct Article {
     pub content_fetch_error: Option<String>,
     pub final_url: Option<String>,
     pub summary: Option<String>,
+    pub summary_lang: Option<String>,
     pub translation: Option<String>,
     pub translation_lang: Option<String>,
     pub is_read: bool,
@@ -183,6 +185,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             final_url            TEXT,
             read_status          INTEGER NOT NULL DEFAULT 0,
             summary              TEXT,
+            summary_lang         TEXT,
             translation          TEXT,
             translation_lang     TEXT,
             is_favorite          INTEGER NOT NULL DEFAULT 0,
@@ -245,6 +248,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE articles ADD COLUMN content_fetch_error TEXT",
         "ALTER TABLE articles ADD COLUMN final_url TEXT",
         "ALTER TABLE articles ADD COLUMN summary TEXT",
+        "ALTER TABLE articles ADD COLUMN summary_lang TEXT",
         "ALTER TABLE articles ADD COLUMN translation TEXT",
         "ALTER TABLE articles ADD COLUMN translation_lang TEXT",
         "ALTER TABLE articles ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
@@ -263,7 +267,8 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
 pub(crate) fn find_feed_by_url(conn: &Connection, url: &str) -> Result<Option<Feed>, String> {
     conn.query_row(
         "SELECT f.id, f.title, COALESCE(f.url, ''), f.site_url, f.last_sync_at,
-                COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread
+                COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread,
+                COUNT(a.id) as total
          FROM feeds f
          LEFT JOIN articles a ON a.feed_id = f.id
          WHERE f.url = ?1
@@ -278,6 +283,7 @@ pub(crate) fn find_feed_by_url(conn: &Connection, url: &str) -> Result<Option<Fe
                 site_url: row.get(3)?,
                 last_sync_at: row.get(4)?,
                 unread: row.get(5)?,
+                total: row.get(6)?,
             })
         },
     )
@@ -327,6 +333,13 @@ pub async fn import_feed(app: &AppHandle, url: &str) -> Result<Feed, String> {
             |row| row.get(0),
         )
         .map_err(|error| format!("Failed to query unread count: {error}"))?;
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE feed_id = ?1",
+            params![feed_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Failed to query total article count: {error}"))?;
     let last_sync_at = conn
         .query_row(
             "SELECT last_sync_at FROM feeds WHERE id = ?1",
@@ -341,6 +354,7 @@ pub async fn import_feed(app: &AppHandle, url: &str) -> Result<Feed, String> {
         url: url.to_string(),
         site_url,
         unread,
+        total,
         last_sync_at,
     })
 }
@@ -577,10 +591,11 @@ fn article_from_row(row: &Row<'_>) -> rusqlite::Result<Article> {
         content_fetch_error: row.get(14)?,
         final_url: row.get(15)?,
         summary: row.get(16)?,
-        translation: row.get(17)?,
-        translation_lang: row.get(18)?,
-        is_favorite: row.get(19)?,
-        read_later: row.get(20)?,
+        summary_lang: row.get(17)?,
+        translation: row.get(18)?,
+        translation_lang: row.get(19)?,
+        is_favorite: row.get(20)?,
+        read_later: row.get(21)?,
     })
 }
 
@@ -644,6 +659,70 @@ fn strip_html_tags(input: &str) -> String {
     collapse_whitespace(&output)
 }
 
+fn strip_markdown_syntax(input: &str) -> String {
+    input
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .replace('~', "")
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start_matches('#').trim_start();
+            trimmed.trim_start_matches('>').trim_start().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_metadata_line(input: &str) -> bool {
+    let value = input.trim();
+    if value.is_empty() {
+        return true;
+    }
+
+    let lowercase = value.to_ascii_lowercase();
+    lowercase == "startups"
+        || lowercase == "climate"
+        || lowercase == "ai"
+        || lowercase == "events"
+        || lowercase == "news"
+        || lowercase == "podcast"
+        || value.ends_with("分钟")
+        || lowercase.ends_with(" min")
+        || lowercase.ends_with(" mins")
+        || lowercase.ends_with(" minutes")
+        || (value.len() >= 10
+            && value.chars().nth(4) == Some('-')
+            && value.chars().nth(7) == Some('-'))
+        || (value.contains('年') && value.contains('月') && value.contains('日'))
+}
+
+fn is_decorative_markdown_block(block: &str) -> bool {
+    let trimmed = block.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let lines = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let normalized = collapse_whitespace(&strip_markdown_syntax(trimmed));
+    let has_image = trimmed.contains("![") && trimmed.contains("](");
+    let link_count = trimmed.matches("](").count();
+    let heading_count = lines.iter().filter(|line| line.starts_with('#')).count();
+    let only_metadata = lines
+        .iter()
+        .all(|line| is_metadata_line(&collapse_whitespace(&strip_markdown_syntax(line))));
+
+    normalized.is_empty()
+        || only_metadata
+        || (has_image && lines.len() <= 4)
+        || (link_count > 0 && lines.len() <= 4 && (has_image || heading_count > 0))
+        || (normalized.chars().count() < 18 && lines.len() <= 2 && link_count > 0)
+}
+
 fn article_text_for_ai(conn: &Connection, article_id: &str) -> Result<String, String> {
     let (title, cleaned_markdown, cleaned_html, content, excerpt): (
         String,
@@ -681,6 +760,117 @@ fn article_text_for_ai(conn: &Connection, article_id: &str) -> Result<String, St
     }
 
     Ok(text)
+}
+
+fn article_blocks_for_translation(conn: &Connection, article_id: &str) -> Result<Vec<String>, String> {
+    let (_title, cleaned_markdown, cleaned_html, content, excerpt): (
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT title, cleaned_markdown, cleaned_html, content, excerpt
+             FROM articles
+             WHERE id = ?1",
+            params![article_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("Article not found: {e}"))?;
+
+    let body = normalize_optional_text(cleaned_markdown)
+        .or_else(|| normalize_optional_text(cleaned_html).map(|html| strip_html_tags(&html).replace(". ", ".\n\n")))
+        .or_else(|| normalize_optional_text(Some(content)))
+        .or_else(|| normalize_optional_text(Some(excerpt)))
+        .ok_or_else(|| "Article content is empty. Please open the article first so the app can fetch and clean it.".to_string())?;
+
+    let blocks = body
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|block| !block.is_empty())
+        .filter(|block| !is_decorative_markdown_block(block))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    if collapse_whitespace(&blocks.join(" ")).chars().count() < 40 {
+        return Err("Article content is too short to translate reliably.".to_string());
+    }
+
+    Ok(blocks)
+}
+
+fn format_translation_blocks(blocks: &[String], start_index: usize) -> String {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(offset, block)| {
+            let index = start_index + offset + 1;
+            format!("[BLOCK {index}]\n{block}\n[END BLOCK {index}]")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn translation_block_count(text: &str) -> usize {
+    parse_structured_translation_blocks(text)
+        .into_iter()
+        .filter(|block| !block.trim().is_empty())
+        .count()
+}
+
+fn parse_structured_translation_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current_start = 1usize;
+
+    loop {
+        let start_tag = format!("[BLOCK {current_start}]");
+        let end_tag = format!("[END BLOCK {current_start}]");
+        let Some(start_index) = text.find(&start_tag) else {
+            break;
+        };
+        let content_start = start_index + start_tag.len();
+        let remaining = &text[content_start..];
+        let Some(relative_end_index) = remaining.find(&end_tag) else {
+            break;
+        };
+        let content = remaining[..relative_end_index].trim().to_string();
+        blocks.push(content);
+        current_start += 1;
+    }
+
+    blocks
+}
+
+fn parse_structured_translation_blocks_from(text: &str, start_index: usize) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current_index = start_index + 1;
+
+    loop {
+        let start_tag = format!("[BLOCK {current_index}]");
+        let end_tag = format!("[END BLOCK {current_index}]");
+        let Some(start_index_in_text) = text.find(&start_tag) else {
+            break;
+        };
+        let content_start = start_index_in_text + start_tag.len();
+        let remaining = &text[content_start..];
+        let Some(relative_end_index) = remaining.find(&end_tag) else {
+            break;
+        };
+        let content = remaining[..relative_end_index].trim().to_string();
+        blocks.push(content);
+        current_index += 1;
+    }
+
+    blocks
 }
 
 fn is_invalid_ai_result(result: &str) -> bool {
@@ -750,6 +940,48 @@ fn fallback_html_from_article(article: &Article) -> String {
     }
 
     format!("<article>{}</article>", blocks.join("\n"))
+}
+
+fn build_reader_document(html: &str, base_url: &str) -> String {
+    let cleaned = remove_html_block_case_insensitive(
+        &remove_html_block_case_insensitive(html, "script"),
+        "noscript",
+    );
+    let base_tag = format!(r#"<base href="{}">"#, escape_html(base_url));
+    let meta_charset = r#"<meta charset="utf-8">"#;
+    let viewport = r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#;
+    let style = r#"<style>
+html, body { margin: 0; padding: 0; background: #f5f1e8; color: #241f17; }
+body { font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 24px; overflow-wrap: anywhere; }
+img, video, iframe, table, pre, code { max-width: 100%; }
+pre { white-space: pre-wrap; }
+a { color: #8b5e1a; }
+</style>"#;
+
+    let lower = cleaned.to_ascii_lowercase();
+    if let Some(head_index) = lower.find("<head") {
+        if let Some(tag_end) = cleaned[head_index..].find('>') {
+            let insert_at = head_index + tag_end + 1;
+            let mut document = String::with_capacity(cleaned.len() + 256);
+            document.push_str(&cleaned[..insert_at]);
+            document.push_str(meta_charset);
+            document.push_str(viewport);
+            document.push_str(&base_tag);
+            document.push_str(style);
+            document.push_str(&cleaned[insert_at..]);
+            return document;
+        }
+    }
+
+    if lower.contains("<html") {
+        return format!(
+            "<!doctype html><html><head>{meta_charset}{viewport}{base_tag}{style}</head><body>{cleaned}</body></html>"
+        );
+    }
+
+    format!(
+        "<!doctype html><html><head>{meta_charset}{viewport}{base_tag}{style}</head><body>{cleaned}</body></html>"
+    )
 }
 
 fn remove_html_block_case_insensitive(input: &str, tag: &str) -> String {
@@ -1006,7 +1238,7 @@ fn load_article_by_id(conn: &Connection, article_id: &str) -> Result<Article, St
     conn.query_row(
         "SELECT id, feed_id, title, url, author, published_at, excerpt, content,
                 read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                  content_fetch_status, content_fetch_error, final_url, summary, translation,
+                  content_fetch_status, content_fetch_error, final_url, summary, summary_lang, translation,
                   translation_lang, is_favorite, read_later
          FROM articles
          WHERE id = ?1",
@@ -1101,7 +1333,8 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT f.id, f.title, COALESCE(f.url, ''), f.site_url, f.last_sync_at,
-                    COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread
+                    COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread,
+                    COUNT(a.id) as total
              FROM feeds f
              LEFT JOIN articles a ON a.feed_id = f.id
              GROUP BY f.id
@@ -1117,6 +1350,7 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
                 site_url: row.get(3)?,
                 last_sync_at: row.get(4)?,
                 unread: row.get(5)?,
+                total: row.get(6)?,
             })
         })
         .map_err(|error| format!("Failed to query feeds: {error}"))?;
@@ -1150,7 +1384,7 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>, read_filter: 
             format!(
                 "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
                         read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                         content_fetch_status, content_fetch_error, final_url, summary, translation,
+                         content_fetch_status, content_fetch_error, final_url, summary, summary_lang, translation,
                          translation_lang, is_favorite, read_later
                  FROM articles
                  WHERE feed_id = ?1{filter_sql}
@@ -1161,7 +1395,7 @@ fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>, read_filter: 
             format!(
                 "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
                         read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                         content_fetch_status, content_fetch_error, final_url, summary, translation,
+                         content_fetch_status, content_fetch_error, final_url, summary, summary_lang, translation,
                          translation_lang, is_favorite, read_later
                  FROM articles
                  WHERE 1 = 1{filter_sql}
@@ -1392,7 +1626,7 @@ fn search_articles(
         .prepare(
             "SELECT id, feed_id, title, COALESCE(url, ''), author, published_at, excerpt, content,
                     read_status, raw_html, cleaned_html, cleaned_markdown, content_fetched_at,
-                    content_fetch_status, content_fetch_error, final_url, summary, translation,
+                    content_fetch_status, content_fetch_error, final_url, summary, summary_lang, translation,
                     translation_lang, is_favorite, read_later
              FROM articles
              WHERE (?1 IS NULL OR ?1 = '' OR feed_id = ?1)
@@ -1629,6 +1863,13 @@ async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article,
     load_article_by_id(&conn, &saved_id)
 }
 
+#[tauri::command]
+async fn fetch_article_html(url: String) -> Result<String, String> {
+    let normalized_url = normalize_fetch_url(&url)?;
+    let raw_html = fetch_html(&normalized_url).await?;
+    Ok(build_reader_document(&raw_html, &normalized_url))
+}
+
 fn load_unread_summary(conn: &Connection) -> Result<UnreadSummary, String> {
     let total_unread: i64 = conn
         .query_row(
@@ -1807,6 +2048,33 @@ fn translate_text_with_config(
     Ok(translation)
 }
 
+fn translate_article_chunk_with_config(
+    config: &LlmConfig,
+    text: &str,
+    target_lang: &str,
+) -> Result<String, String> {
+    let lang_name = language_name(target_lang);
+    let prompt = format!(
+        "Translate the following article into {}.\nEach source paragraph is wrapped in [BLOCK n] ... [END BLOCK n].\nReturn the translation using exactly the same block markers and numbers.\nTranslate only the text inside each block.\nDo not merge or split blocks.\nDo not add commentary or extra text outside the block markers.\n\n{}",
+        lang_name, text
+    );
+    let translation = llm_provider::call_llm(
+        config,
+        &format!(
+            "You are a professional translator. Translate the user's article into {} and preserve its block structure exactly.",
+            lang_name
+        ),
+        &prompt,
+    )?;
+    if is_invalid_ai_result(&translation) {
+        return Err(
+            "LLM returned an invalid translation. Please check the configured model/provider and try again."
+                .to_string(),
+        );
+    }
+    Ok(translation)
+}
+
 #[tauri::command]
 fn save_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
     let conn = open_database(&app)?;
@@ -1834,36 +2102,43 @@ fn get_llm_config(app: AppHandle) -> Result<LlmConfig, String> {
 fn summarize_article(
     app: AppHandle,
     article_id: String,
+    target_lang: String,
     force: Option<bool>,
 ) -> Result<String, String> {
     let conn = open_database(&app)?;
 
     if force != Some(true) {
-        let cached: Option<String> = conn
+        let cached: Option<(Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT summary FROM articles WHERE id = ?1",
+                "SELECT summary, summary_lang FROM articles WHERE id = ?1",
                 params![article_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .ok()
-            .flatten();
+            .ok();
 
-        if let Some(ref s) = cached {
-            if !s.is_empty() && !is_invalid_ai_result(s) {
-                return Ok(s.clone());
+        if let Some((Some(summary), cached_lang)) = cached {
+            if !summary.is_empty()
+                && !is_invalid_ai_result(&summary)
+                && cached_lang.as_deref() == Some(target_lang.as_str())
+            {
+                return Ok(summary);
             }
         }
     }
 
     let config = get_llm_config_from_db(&conn)?;
     let article_text = article_text_for_ai(&conn, &article_id)?;
+    let lang_name = language_name(&target_lang);
     let prompt = format!(
-        "Summarize the following article in 2-3 sentences. Reply with the summary only.\n\n{}",
-        article_text
+        "Summarize the following article in 2-3 sentences in {}. Reply with the summary only.\n\n{}",
+        lang_name, article_text
     );
     let summary = llm_provider::call_llm(
         &config,
-        "You are a helpful assistant that summarizes articles concisely.",
+        &format!(
+            "You are a helpful assistant that summarizes articles concisely in {}.",
+            lang_name
+        ),
         &prompt,
     )?;
     if is_invalid_ai_result(&summary) {
@@ -1871,8 +2146,8 @@ fn summarize_article(
     }
 
     conn.execute(
-        "UPDATE articles SET summary = ?1 WHERE id = ?2",
-        params![summary, article_id],
+        "UPDATE articles SET summary = ?1, summary_lang = ?2 WHERE id = ?3",
+        params![summary, target_lang, article_id],
     )
     .map_err(|e| format!("Failed to save summary: {e}"))?;
 
@@ -1895,18 +2170,47 @@ fn translate_article(
         )
         .ok();
 
+    let source_blocks = article_blocks_for_translation(&conn, &article_id)?;
+    let source_block_count = source_blocks.len();
+
     if let Some((Some(translation), cached_lang)) = cached {
         if !translation.is_empty()
             && !is_invalid_ai_result(&translation)
             && cached_lang.as_deref() == Some(target_lang.as_str())
+            && translation_block_count(&translation) == source_block_count
         {
             return Ok(translation);
         }
     }
 
     let config = get_llm_config_from_db(&conn)?;
-    let article_text = article_text_for_ai(&conn, &article_id)?;
-    let translation = translate_text_with_config(&config, &article_text, &target_lang)?;
+    const TRANSLATION_CHUNK_SIZE: usize = 6;
+    let mut translated_chunks = Vec::new();
+
+    for (chunk_index, block_chunk) in source_blocks.chunks(TRANSLATION_CHUNK_SIZE).enumerate() {
+        let start_index = chunk_index * TRANSLATION_CHUNK_SIZE;
+        let formatted_chunk = format_translation_blocks(block_chunk, start_index);
+        let translated_chunk = translate_article_chunk_with_config(&config, &formatted_chunk, &target_lang)?;
+        let parsed_blocks = parse_structured_translation_blocks_from(&translated_chunk, start_index);
+        if parsed_blocks.len() != block_chunk.len() {
+            return Err(format!(
+                "LLM translation did not preserve paragraph structure for chunk {}. Please try again.",
+                chunk_index + 1
+            ));
+        }
+        translated_chunks.extend(parsed_blocks);
+    }
+
+    let translation = translated_chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, block)| format!("[BLOCK {}]\n{}\n[END BLOCK {}]", index + 1, block, index + 1))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if translation_block_count(&translation) != source_block_count {
+        return Err("LLM translation did not preserve paragraph structure. Please try again.".to_string());
+    }
 
     conn.execute(
         "UPDATE articles SET translation = ?1, translation_lang = ?2 WHERE id = ?3",
@@ -1964,6 +2268,7 @@ pub fn run() {
             translate_text,
             clean_article,
             fetch_and_clean_article,
+            fetch_article_html,
             opml::import_opml,
             opml::export_opml,
         ])

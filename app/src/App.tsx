@@ -10,22 +10,24 @@ import {
   type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import MarkdownIt from "markdown-it";
 import { Sidebar } from "./components/Sidebar";
 import { ArticleList } from "./components/ArticleList";
-import type { Feed, Article, ReadFilter, UnreadSummary, SyncStatus, Annotation } from "./types";
+import type { Feed, Article, ReadFilter, UnreadSummary, SyncStatus, Annotation, AppLanguage } from "./types";
 import "./App.css";
 
 /* ── Mock data (pure frontend dev — Tauri invoke unavailable) ── */
 const MOCK_FEEDS: Feed[] = [];
 const MOCK_ARTICLES: Article[] = [];
 
-type ReadView = "original" | "translation" | "bilingual";
+type ReadView = "original" | "translation";
 type ReaderSnapshot = {
   article: Article | null;
   pdfUrl: string | null;
   pdfTitle: string | null;
   originalUrl: string | null;
   originalTitle: string | null;
+  originalHtml: string | null;
 };
 type SelectionOverlay = {
   text: string;
@@ -48,6 +50,11 @@ const HIGHLIGHT_COLORS = ["#ffd400", "#ff5f67", "#58b83d", "#33a6d8", "#9b7de3",
 const DEFAULT_HIGHLIGHT_COLOR = HIGHLIGHT_COLORS[0];
 const DEFAULT_HIGHLIGHT_STYLE: HighlightStyle = "background";
 const DEFAULT_READER_FONT_SCALE = 1;
+const markdownRenderer = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: false,
+});
 
 function escapeHtml(value: string) {
   return value
@@ -75,6 +82,190 @@ function highlightText(text: string, query: string): ReactNode {
       part
     ),
   );
+}
+
+type ReaderContentBlock = {
+  id: string;
+  text: string;
+  html: string;
+  kind: "heading" | "paragraph" | "quote" | "list" | "code";
+};
+
+function extractReaderContentBlocks(html: string): ReaderContentBlock[] {
+  if (!html.trim()) return [];
+  const document = new DOMParser().parseFromString(`<body>${html}</body>`, "text/html");
+  const nodes = Array.from(
+    document.body.querySelectorAll("h1, h2, h3, h4, h5, h6, p, blockquote, li, pre"),
+  );
+
+  return nodes
+    .map((node, index) => {
+      const normalizedText = node.textContent?.trim().replace(/\s+/g, " ") ?? "";
+      if (!normalizedText) return null;
+      const tagName = node.tagName.toLowerCase();
+      const kind =
+        tagName.startsWith("h")
+          ? "heading"
+          : tagName === "blockquote"
+            ? "quote"
+            : tagName === "pre"
+              ? "code"
+              : tagName === "li"
+                ? "list"
+                : "paragraph";
+
+      return {
+        id: `${tagName}-${index}`,
+        text: normalizedText,
+        html: node.outerHTML.trim(),
+        kind,
+      } satisfies ReaderContentBlock;
+    })
+    .filter((block): block is ReaderContentBlock => block !== null);
+}
+
+function stripMarkdownSyntax(text: string) {
+  return text
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, "$1")
+    .replace(/^>\s?/gm, "")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/[*_~`]+/g, "")
+    .trim();
+}
+
+function normalizeTranslationText(text: string) {
+  return stripMarkdownSyntax(text)
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function detectArticleLanguage(article: Article | null): string {
+  if (!article) return "zh";
+  const sample = [
+    article.title,
+    article.cleanedMarkdown,
+    article.cleanedHtml ? stripMarkdownSyntax(article.cleanedHtml) : "",
+    article.content,
+    article.excerpt,
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 4000);
+
+  if (!sample.trim()) return "zh";
+
+  const counts = {
+    zh: (sample.match(/[\u4e00-\u9fff]/g) ?? []).length,
+    ja: (sample.match(/[\u3040-\u30ff]/g) ?? []).length,
+    ko: (sample.match(/[\uac00-\ud7af]/g) ?? []).length,
+    en: (sample.match(/[A-Za-z]/g) ?? []).length,
+  };
+
+  if (counts.ja >= 12 && counts.ja >= counts.zh * 0.2) return "ja";
+  if (counts.ko >= 12) return "ko";
+  if (counts.zh >= 12) return "zh";
+  if (counts.en >= 24) return "en";
+  return "zh";
+}
+
+function isMetadataLine(text: string) {
+  const value = text.trim();
+  if (!value) return true;
+  return (
+    /^\d{4}年\d{1,2}月\d{1,2}日(?:\s+\d+分钟)?$/.test(value) ||
+    /^\d{4}-\d{1,2}-\d{1,2}$/.test(value) ||
+    /^\d+\s*(min|mins|minutes)$/i.test(value) ||
+    /^(startups|climate|ai|events|news|podcast)$/i.test(value)
+  );
+}
+
+function isDecorativeMarkdownBlock(block: string) {
+  const trimmed = block.trim();
+  if (!trimmed) return true;
+
+  const lines = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const normalized = stripMarkdownSyntax(trimmed);
+  const hasImage = /!\[[^\]]*\]\(([^)]+)\)/.test(trimmed);
+  const linkMatches = Array.from(trimmed.matchAll(/\[[^\]]+\]\((https?:\/\/[^)]+)\)/g));
+  const onlyMetadata = lines.every((line) => isMetadataLine(stripMarkdownSyntax(line)));
+  const headingCount = lines.filter((line) => /^#{1,6}\s/.test(line)).length;
+
+  if (!normalized) return true;
+  if (onlyMetadata) return true;
+  if (hasImage && lines.length <= 4) return true;
+  if (linkMatches.length > 0 && lines.length <= 4 && (hasImage || headingCount > 0)) return true;
+  if (normalized.length < 18 && lines.length <= 2 && linkMatches.length > 0) return true;
+
+  return false;
+}
+
+function blocksFromMarkdown(markdown: string): ReaderContentBlock[] {
+  return markdown
+    .split(/\n\s*\n+/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .filter((block) => !isDecorativeMarkdownBlock(block))
+    .map((block, index) => {
+      const normalized = stripMarkdownSyntax(block);
+      const kind =
+        /^#{1,6}\s/.test(block)
+          ? "heading"
+          : /^>\s?/.test(block)
+            ? "quote"
+            : /^[-*]\s|^\d+\.\s/.test(block)
+              ? "list"
+              : /```/.test(block)
+                ? "code"
+                : "paragraph";
+      return {
+        id: `markdown-${index}`,
+        text: normalized,
+        html: markdownRenderer.render(block).trim(),
+        kind,
+      } satisfies ReaderContentBlock;
+    })
+    .filter((block) => block.text);
+}
+
+function translationSourceBlocks(article: Article | null, emptyText: string): ReaderContentBlock[] {
+  if (!article) return [];
+  if (article.cleanedMarkdown?.trim()) {
+    const markdownBlocks = blocksFromMarkdown(article.cleanedMarkdown);
+    if (markdownBlocks.length > 0) return markdownBlocks;
+  }
+  if (article.cleanedHtml?.trim()) {
+    const htmlBlocks = extractReaderContentBlocks(article.cleanedHtml);
+    if (htmlBlocks.length > 0) return htmlBlocks;
+  }
+  const fallback = (article.content || article.excerpt || emptyText).trim();
+  return fallback
+    .split(/\n\s*\n+/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .map((block, index) => ({
+      id: `fallback-${index}`,
+      text: block,
+      html: `<p>${escapeHtml(block)}</p>`,
+      kind: "paragraph" as const,
+    }));
+}
+
+function splitTranslationBlocks(translation: string): string[] {
+  const structuredBlocks = Array.from(
+    translation.matchAll(/\[BLOCK\s+(\d+)\]([\s\S]*?)\[END BLOCK\s+\1\]/g),
+    (match) => normalizeTranslationText(match[2]),
+  ).filter(Boolean);
+  if (structuredBlocks.length > 0) return structuredBlocks;
+
+  return translation
+    .split(/\n\s*\n+/)
+    .map((block) => normalizeTranslationText(block))
+    .filter(Boolean);
 }
 
 function textMatchesQuery(text: string | null | undefined, query: string) {
@@ -199,9 +390,12 @@ function locateHighlights(html: string, annotations: Annotation[], searchQuery: 
 
 function App() {
   const readerHtmlRef = useRef<HTMLDivElement | null>(null);
+  const readerContentRef = useRef<HTMLDivElement | null>(null);
+  const readerPaneRef = useRef<HTMLDivElement | null>(null);
   const annotationPanelRef = useRef<HTMLElement | null>(null);
   const pendingTextSelectionRef = useRef<PendingTextSelection | null>(null);
   const suppressSelectionUntilRef = useRef(0);
+  const autoReadMarkedIdsRef = useRef<Set<string>>(new Set());
   const [feeds, setFeeds] = useState<Feed[]>([]);
   const [articles, setArticles] = useState<Article[]>([]);
   const [searchResults, setSearchResults] = useState<Article[] | null>(null);
@@ -214,7 +408,9 @@ function App() {
   const [readerPdfTitle, setReaderPdfTitle] = useState<string | null>(null);
   const [readerOriginalUrl, setReaderOriginalUrl] = useState<string | null>(null);
   const [readerOriginalTitle, setReaderOriginalTitle] = useState<string | null>(null);
+  const [readerOriginalHtml, setReaderOriginalHtml] = useState<string | null>(null);
   const [readerHistory, setReaderHistory] = useState<ReaderSnapshot[]>([]);
+  const [readerForwardHistory, setReaderForwardHistory] = useState<ReaderSnapshot[]>([]);
   const [readFilter, setReadFilter] = useState<ReadFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchScope, setSearchScope] = useState<SearchScope>("all");
@@ -239,6 +435,8 @@ function App() {
   // AI feature states
   const [showSettings, setShowSettings] = useState(false);
   const [settingsForm, setSettingsForm] = useState({ baseUrl: "", apiKey: "", modelName: "" });
+  const [appLanguage, setAppLanguage] = useState<AppLanguage>("zh");
+  const [settingsLanguage, setSettingsLanguage] = useState<AppLanguage>("zh");
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
@@ -248,9 +446,13 @@ function App() {
   const [aiError, setAiError] = useState<string | null>(null);
   const [readView, setReadView] = useState<ReadView>("original");
   const [targetLang, setTargetLang] = useState("zh");
+  const [summaryLang, setSummaryLang] = useState("zh");
+  const [summaryCache, setSummaryCache] = useState<Record<string, Record<string, string>>>({});
+  const isSummaryLangPinnedRef = useRef(false);
 
   // Sync status
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const isZh = appLanguage === "zh";
 
   const refreshSyncStatus = useCallback(async () => {
     try {
@@ -314,6 +516,25 @@ function App() {
     void loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAppLanguage() {
+      try {
+        const savedLanguage = await invoke<AppLanguage | null>("load_setting", { key: "app_language" });
+        if (!cancelled && (savedLanguage === "zh" || savedLanguage === "en")) {
+          setAppLanguage(savedLanguage);
+          setSettingsLanguage(savedLanguage);
+        }
+      } catch {
+        // Keep default language.
+      }
+    }
+    void loadAppLanguage();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const refreshFeeds = useCallback(async () => {
     try {
       setFeeds(await invoke<Feed[]>("list_feeds"));
@@ -359,16 +580,18 @@ function App() {
 
   const loadSettings = useCallback(async () => {
     try {
-      const [baseUrl, apiKey, modelName] = await Promise.all([
+      const [baseUrl, apiKey, modelName, savedLanguage] = await Promise.all([
         invoke<string | null>("load_setting", { key: "llm_base_url" }),
         invoke<string | null>("load_setting", { key: "llm_api_key" }),
         invoke<string | null>("load_setting", { key: "llm_model_name" }),
+        invoke<AppLanguage | null>("load_setting", { key: "app_language" }),
       ]);
       setSettingsForm({
         baseUrl: baseUrl ?? "",
         apiKey: apiKey ?? "",
         modelName: modelName ?? "",
       });
+      setSettingsLanguage(savedLanguage === "en" ? "en" : "zh");
     } catch {
       // Settings not configured yet
     }
@@ -387,7 +610,9 @@ function App() {
         invoke("save_setting", { key: "llm_base_url", value: settingsForm.baseUrl }),
         invoke("save_setting", { key: "llm_api_key", value: settingsForm.apiKey }),
         invoke("save_setting", { key: "llm_model_name", value: settingsForm.modelName }),
+        invoke("save_setting", { key: "app_language", value: settingsLanguage }),
       ]);
+      setAppLanguage(settingsLanguage);
       setShowSettings(false);
     } catch (error) {
       setAiError(error instanceof Error ? error.message : String(error));
@@ -396,20 +621,28 @@ function App() {
     }
   }
 
-  async function handleSummarize(force = false) {
+  async function handleSummarize(force = false, lang = summaryLang) {
     if (!selectedArticle) return;
     try {
       setIsSummarizing(true);
       setAiError(null);
       const summary = await invoke<string>("summarize_article", {
         articleId: selectedArticle.id,
+        targetLang: lang,
         force,
       });
+      setSummaryCache((prev) => ({
+        ...prev,
+        [selectedArticle.id]: {
+          ...(prev[selectedArticle.id] ?? {}),
+          [lang]: summary,
+        },
+      }));
       setArticles((prev) =>
-        prev.map((a) => (a.id === selectedArticle.id ? { ...a, summary } : a)),
+        prev.map((a) => (a.id === selectedArticle.id ? { ...a, summary, summaryLang: lang } : a)),
       );
       if (readerArticle?.id === selectedArticle.id) {
-        setReaderArticle({ ...selectedArticle, summary });
+        setReaderArticle({ ...selectedArticle, summary, summaryLang: lang });
       }
     } catch (error) {
       setAiError(error instanceof Error ? error.message : String(error));
@@ -554,9 +787,9 @@ function App() {
         ? selectedArticle.content
         : selectedArticle.excerpt.trim()
           ? `<p>${escapeHtml(selectedArticle.excerpt)}</p>`
-          : "<p>暂无可显示内容</p>";
+          : `<p>${isZh ? "暂无可显示内容" : "No readable content available."}</p>`;
     return locateHighlights(source, annotations, activeSearchQuery);
-  }, [activeSearchQuery, annotations, selectedArticle]);
+  }, [activeSearchQuery, annotations, isZh, selectedArticle]);
 
   const bodySearchMatchCount = useMemo(() => {
     if (!readerHtml || !activeSearchQuery) return 0;
@@ -576,6 +809,30 @@ function App() {
     [activeSearchQuery, annotations],
   );
   const totalSearchMatchCount = bodySearchMatchCount + annotationSearchMatchCount;
+  const activeSummary = selectedArticle
+    ? summaryCache[selectedArticle.id]?.[summaryLang] ??
+      (selectedArticle.summaryLang === summaryLang ? selectedArticle.summary ?? null : null)
+    : null;
+  const hasActiveSummary = !!activeSummary;
+  const hasActiveTranslation = !!selectedArticle?.translation && selectedArticle.translationLang === targetLang;
+  const displayedBodyLang =
+    readView === "translation" && hasActiveTranslation
+      ? targetLang
+      : detectArticleLanguage(selectedArticle);
+  const translationPairs = useMemo(() => {
+    if (!hasActiveTranslation || !selectedArticle?.translation) return [];
+    const originalBlocks = translationSourceBlocks(
+      selectedArticle,
+      isZh ? "暂无可显示内容" : "No readable content available.",
+    );
+    const translatedBlocks = splitTranslationBlocks(selectedArticle.translation);
+    const total = Math.max(originalBlocks.length, translatedBlocks.length);
+    return Array.from({ length: total }, (_, index) => ({
+      id: `pair-${index}`,
+      original: originalBlocks[index] ?? null,
+      translation: translatedBlocks[index] ?? "",
+    })).filter((pair) => pair.original || pair.translation);
+  }, [hasActiveTranslation, isZh, selectedArticle]);
 
   useEffect(() => {
     if (!selectedArticle) return;
@@ -597,9 +854,7 @@ function App() {
         mergeArticle(updatedArticle);
       } catch (error) {
         if (cancelled) return;
-        setErrorMessage(
-          error instanceof Error ? `正文清洗失败：${error.message}` : `正文清洗失败：${String(error)}`,
-        );
+        setErrorMessage(error instanceof Error ? `${isZh ? "正文清洗失败" : "Content cleanup failed"}: ${error.message}` : `${isZh ? "正文清洗失败" : "Content cleanup failed"}: ${String(error)}`);
       } finally {
         if (!cancelled) {
           setIsCleaningArticle(false);
@@ -612,15 +867,36 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedArticle]);
-
-  const hasActiveTranslation = !!selectedArticle?.translation && selectedArticle.translationLang === targetLang;
+  }, [isZh, selectedArticle]);
 
   useEffect(() => {
     if (!hasActiveTranslation && readView !== "original") {
       setReadView("original");
     }
   }, [hasActiveTranslation, readView]);
+
+  useEffect(() => {
+    if (isSummaryLangPinnedRef.current) return;
+    setSummaryLang(displayedBodyLang);
+  }, [displayedBodyLang]);
+
+  useEffect(() => {
+    if (!selectedArticle?.id || !selectedArticle.summary || !selectedArticle.summaryLang) return;
+    setSummaryCache((prev) => ({
+      ...prev,
+      [selectedArticle.id]: {
+        ...(prev[selectedArticle.id] ?? {}),
+        [selectedArticle.summaryLang as string]: selectedArticle.summary as string,
+      },
+    }));
+  }, [selectedArticle?.id, selectedArticle?.summary, selectedArticle?.summaryLang]);
+
+  useEffect(() => {
+    if (!selectedArticle?.id) return;
+    if (!selectedArticle.isRead) {
+      autoReadMarkedIdsRef.current.delete(selectedArticle.id);
+    }
+  }, [selectedArticle?.id, selectedArticle?.isRead]);
 
   useEffect(() => {
     setReaderArticle(null);
@@ -662,16 +938,16 @@ function App() {
   }, [readerOriginalUrl, readerPdfUrl, selectedArticle?.id]);
 
   const contentStatusLabel = useMemo(() => {
-    if (readerPdfUrl) return "正在预览 PDF 文档";
-    if (readerOriginalUrl) return "正在查看原文网页";
+    if (readerPdfUrl) return isZh ? "正在预览 PDF 文档" : "Previewing PDF document";
+    if (readerOriginalUrl) return isZh ? "正在查看原文网页" : "Viewing original webpage";
     if (!selectedArticle) return null;
-    if (isOpeningReaderLink) return "正在打开文章...";
-    if (isCleaningArticle) return "正在清洗正文...";
-    if (selectedArticle.cleanedHtml?.trim()) return "已显示清洗正文";
-    if (selectedArticle.content?.trim()) return "当前显示 Feed 原文";
-    if (selectedArticle.excerpt.trim()) return "当前显示 Feed 摘要";
-    return "暂无正文内容";
-  }, [isCleaningArticle, isOpeningReaderLink, readerOriginalUrl, readerPdfUrl, selectedArticle]);
+    if (isOpeningReaderLink) return isZh ? "正在打开文章..." : "Opening article...";
+    if (isCleaningArticle) return isZh ? "正在清洗正文..." : "Cleaning article content...";
+    if (selectedArticle.cleanedHtml?.trim()) return isZh ? "已显示清洗正文" : "Showing cleaned article";
+    if (selectedArticle.content?.trim()) return isZh ? "当前显示 Feed 原文" : "Showing feed content";
+    if (selectedArticle.excerpt.trim()) return isZh ? "当前显示 Feed 摘要" : "Showing feed excerpt";
+    return isZh ? "暂无正文内容" : "No article content available";
+  }, [isCleaningArticle, isOpeningReaderLink, isZh, readerOriginalUrl, readerPdfUrl, selectedArticle]);
 
   const originalArticleUrl = selectedArticle?.finalUrl?.trim() || selectedArticle?.url?.trim() || "";
 
@@ -686,6 +962,7 @@ function App() {
       pdfTitle: readerPdfTitle,
       originalUrl: readerOriginalUrl,
       originalTitle: readerOriginalTitle,
+      originalHtml: readerOriginalHtml,
     };
   }
 
@@ -694,9 +971,9 @@ function App() {
     try {
       const pathname = new URL(url).pathname;
       const segment = pathname.split("/").filter(Boolean).pop();
-      return segment || "PDF Document";
+      return segment || (isZh ? "PDF 文档" : "PDF Document");
     } catch {
-      return "PDF Document";
+      return isZh ? "PDF 文档" : "PDF Document";
     }
   }
 
@@ -707,26 +984,30 @@ function App() {
 
       if (isPdfUrl(url)) {
         setReaderHistory((prev) => [...prev, buildReaderSnapshot()]);
+        setReaderForwardHistory([]);
         setReaderArticle(null);
         setReaderPdfUrl(url);
         setReaderPdfTitle(derivePdfTitle(url, fallbackTitle));
         setReaderOriginalUrl(null);
         setReaderOriginalTitle(null);
+        setReaderOriginalHtml(null);
         setReadView("original");
         return;
       }
 
       const openedArticle = await invoke<Article>("fetch_and_clean_article", { url });
       setReaderHistory((prev) => [...prev, buildReaderSnapshot()]);
+      setReaderForwardHistory([]);
       setReaderArticle(openedArticle);
       setReaderPdfUrl(null);
       setReaderPdfTitle(null);
       setReaderOriginalUrl(null);
       setReaderOriginalTitle(null);
+      setReaderOriginalHtml(null);
       setReadView("original");
     } catch (error) {
       setErrorMessage(
-        error instanceof Error ? `打开文章失败：${error.message}` : `打开文章失败：${String(error)}`,
+        error instanceof Error ? `${isZh ? "打开文章失败" : "Failed to open article"}: ${error.message}` : `${isZh ? "打开文章失败" : "Failed to open article"}: ${String(error)}`,
       );
     } finally {
       setIsOpeningReaderLink(false);
@@ -763,10 +1044,13 @@ function App() {
     setReaderPdfTitle(null);
     setReaderOriginalUrl(null);
     setReaderOriginalTitle(null);
+    setReaderOriginalHtml(null);
     setReaderHistory([]);
+    setReaderForwardHistory([]);
     setSelectionOverlay(null);
     setSelectionTranslation(null);
     pendingTextSelectionRef.current = null;
+    isSummaryLangPinnedRef.current = false;
     setSelectedArticleId(articleId);
     setReadView("original");
   }
@@ -777,7 +1061,9 @@ function App() {
     setReaderPdfTitle(null);
     setReaderOriginalUrl(null);
     setReaderOriginalTitle(null);
+    setReaderOriginalHtml(null);
     setReaderHistory([]);
+    setReaderForwardHistory([]);
     setSelectionOverlay(null);
     setSelectionTranslation(null);
     pendingTextSelectionRef.current = null;
@@ -788,19 +1074,42 @@ function App() {
   }
 
   function handleReaderBack() {
+    const currentSnapshot = buildReaderSnapshot();
     setReaderHistory((prev) => {
       if (prev.length === 0) return prev;
       const nextHistory = prev.slice(0, -1);
       const previousSnapshot = prev[prev.length - 1] ?? null;
+      setReaderForwardHistory((forward) => [...forward, currentSnapshot]);
       setReaderArticle(previousSnapshot?.article ?? null);
       setReaderPdfUrl(previousSnapshot?.pdfUrl ?? null);
       setReaderPdfTitle(previousSnapshot?.pdfTitle ?? null);
       setReaderOriginalUrl(previousSnapshot?.originalUrl ?? null);
       setReaderOriginalTitle(previousSnapshot?.originalTitle ?? null);
+      setReaderOriginalHtml(previousSnapshot?.originalHtml ?? null);
       setSelectionOverlay(null);
       setSelectionTranslation(null);
       pendingTextSelectionRef.current = null;
       return nextHistory;
+    });
+  }
+
+  function handleReaderForward() {
+    const currentSnapshot = buildReaderSnapshot();
+    setReaderForwardHistory((prev) => {
+      if (prev.length === 0) return prev;
+      const nextForwardHistory = prev.slice(0, -1);
+      const nextSnapshot = prev[prev.length - 1] ?? null;
+      setReaderHistory((back) => [...back, currentSnapshot]);
+      setReaderArticle(nextSnapshot?.article ?? null);
+      setReaderPdfUrl(nextSnapshot?.pdfUrl ?? null);
+      setReaderPdfTitle(nextSnapshot?.pdfTitle ?? null);
+      setReaderOriginalUrl(nextSnapshot?.originalUrl ?? null);
+      setReaderOriginalTitle(nextSnapshot?.originalTitle ?? null);
+      setReaderOriginalHtml(nextSnapshot?.originalHtml ?? null);
+      setSelectionOverlay(null);
+      setSelectionTranslation(null);
+      pendingTextSelectionRef.current = null;
+      return nextForwardHistory;
     });
   }
 
@@ -867,6 +1176,32 @@ function App() {
     setSelectionTranslation(null);
   }
 
+  function tryAutoMarkArticleRead(container: HTMLDivElement | null) {
+    if (readerPdfUrl || readerOriginalUrl || !selectedArticle || selectedArticle.isRead) return;
+    if (autoReadMarkedIdsRef.current.has(selectedArticle.id)) return;
+    if (!container) return;
+
+    const scrollableHeight = container.scrollHeight - container.clientHeight;
+    if (scrollableHeight <= 120) return;
+
+    const progress = container.scrollTop / scrollableHeight;
+    const reachedBottom = scrollableHeight - container.scrollTop <= 24;
+    if (!reachedBottom && progress < 0.35) return;
+
+    autoReadMarkedIdsRef.current.add(selectedArticle.id);
+    void handleToggleReadStatus(selectedArticle);
+  }
+
+  function handleReaderContentScroll() {
+    if (isAnnotationDrawerOpen) return;
+    tryAutoMarkArticleRead(readerContentRef.current);
+  }
+
+  function handleReaderPaneScroll() {
+    if (!isAnnotationDrawerOpen) return;
+    tryAutoMarkArticleRead(readerPaneRef.current);
+  }
+
   async function handleTranslateSelection() {
     if (!selectionOverlay?.text) return;
     try {
@@ -886,18 +1221,30 @@ function App() {
 
   async function handleViewOriginal() {
     if (!originalArticleUrl) {
-      setErrorMessage("No original article URL is available.");
+      setErrorMessage(isZh ? "没有可用的原文链接。" : "No original article URL is available.");
       return;
     }
 
-    setErrorMessage(null);
-    setReaderHistory((prev) => [...prev, buildReaderSnapshot()]);
-    setReaderArticle(null);
-    setReaderPdfUrl(null);
-    setReaderPdfTitle(null);
-    setReaderOriginalUrl(originalArticleUrl);
-    setReaderOriginalTitle(selectedArticle?.title ? `Original: ${selectedArticle.title}` : "Original Article");
-    setReadView("original");
+    try {
+      setIsOpeningReaderLink(true);
+      setErrorMessage(null);
+      const originalHtml = await invoke<string>("fetch_article_html", { url: originalArticleUrl });
+      setReaderHistory((prev) => [...prev, buildReaderSnapshot()]);
+      setReaderForwardHistory([]);
+      setReaderArticle(null);
+      setReaderPdfUrl(null);
+      setReaderPdfTitle(null);
+      setReaderOriginalUrl(originalArticleUrl);
+      setReaderOriginalTitle(selectedArticle?.title ? `${isZh ? "网页" : "Webpage"}: ${selectedArticle.title}` : isZh ? "原始网页" : "Original Webpage");
+      setReaderOriginalHtml(originalHtml);
+      setReadView("original");
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? `${isZh ? "打开原文失败" : "Failed to open original"}: ${error.message}` : `${isZh ? "打开原文失败" : "Failed to open original"}: ${String(error)}`,
+      );
+    } finally {
+      setIsOpeningReaderLink(false);
+    }
   }
 
   async function createHighlight() {
@@ -907,7 +1254,7 @@ function App() {
     setNewNoteDraft(null);
     setPendingDeleteId(null);
     if (!root || !selectedArticle) {
-      setAnnotationMessage("Select text inside the article first.");
+      setAnnotationMessage(isZh ? "请先在文章中选择文本。" : "Select text inside the article first.");
       return;
     }
 
@@ -937,7 +1284,7 @@ function App() {
     }
 
     if (!pendingSelection?.selectedText.trim()) {
-      setAnnotationMessage("Select text inside the article first.");
+      setAnnotationMessage(isZh ? "请先在文章中选择文本。" : "Select text inside the article first.");
       return;
     }
 
@@ -1106,8 +1453,7 @@ function App() {
         feeds={feeds}
         allArticleCount={allArticleCount}
         allUnreadCount={allUnreadCount}
-        favoriteCount={articles.filter((article) => article.isFavorite).length}
-        readLaterCount={articles.filter((article) => article.readLater).length}
+        appLanguage={appLanguage}
         selectedFeedId={selectedFeedId}
         syncStatus={syncStatus}
         onSelectFeed={handleSelectFeed}
@@ -1119,6 +1465,7 @@ function App() {
         totalCount={totalCount}
         unreadCount={unreadCount}
         readCount={readCount}
+        appLanguage={appLanguage}
         selectedArticleId={selectedListArticle?.id ?? null}
         isLoading={isLoading}
         readFilter={readFilter}
@@ -1195,20 +1542,20 @@ function App() {
                 onClick={handleTranslateSelection}
                 disabled={isTranslatingSelection}
               >
-                {isTranslatingSelection ? "Translating..." : "Translate"}
+                {isTranslatingSelection ? (isZh ? "翻译中..." : "Translating...") : isZh ? "翻译" : "Translate"}
               </button>
               <button
                 type="button"
                 className="primary-button"
                 onClick={() => void createHighlight()}
               >
-                Highlight
+                {isZh ? "高亮" : "Highlight"}
               </button>
               <button
                 type="button"
                 onClick={clearSelectionOverlay}
               >
-                Close
+                {isZh ? "关闭" : "Close"}
               </button>
             </div>
             {selectionTranslation && (
@@ -1219,7 +1566,118 @@ function App() {
         {selectedArticle || readerPdfUrl || readerOriginalUrl ? (
           <>
             <div className="reader-header">
+              <div className="reader-toolbar">
+                <div className="reader-nav" aria-label="Reader navigation">
+                  <button
+                    type="button"
+                    className="reader-nav-button"
+                    onClick={handleReaderBack}
+                    disabled={readerHistory.length === 0}
+                    title={readerHistory.length > 0 ? (isZh ? "回退" : "Back") : isZh ? "没有可回退的内容" : "Nothing to go back to"}
+                    aria-label={isZh ? "回退" : "Back"}
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="m11.5 4.5-6 5.5 6 5.5" />
+                      <path d="M6 10h8.5" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    className="reader-nav-button"
+                    onClick={handleReaderForward}
+                    disabled={readerForwardHistory.length === 0}
+                    title={readerForwardHistory.length > 0 ? (isZh ? "前进" : "Forward") : isZh ? "没有可前进的内容" : "Nothing to go forward to"}
+                    aria-label={isZh ? "前进" : "Forward"}
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="m8.5 4.5 6 5.5-6 5.5" />
+                      <path d="M14 10H5.5" />
+                    </svg>
+                  </button>
+                </div>
+                <div className="reader-actions">
+                  <button
+                    type="button"
+                    className="reader-action-button"
+                    onClick={() => void handleViewOriginal()}
+                    disabled={!originalArticleUrl}
+                    title={isZh ? "查看原始网页" : "View original webpage"}
+                    aria-label={isZh ? "查看原始网页" : "View original webpage"}
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="M4.5 5.5h11v9h-11z" />
+                      <path d="M7.5 8.5h5" />
+                      <path d="M7.5 11.5h4" />
+                    </svg>
+                    <span>{isZh ? "网页" : "Webpage"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={isAnnotationDrawerOpen ? "reader-action-button active" : "reader-action-button"}
+                    onClick={() => setIsAnnotationDrawerOpen((current) => !current)}
+                    disabled={!selectedArticle || !!readerPdfUrl}
+                    title={isAnnotationDrawerOpen ? (isZh ? `关闭批注 (${annotations.length})` : `Close notes (${annotations.length})`) : isZh ? `打开批注 (${annotations.length})` : `Open notes (${annotations.length})`}
+                    aria-label={isAnnotationDrawerOpen ? (isZh ? `关闭批注 (${annotations.length})` : `Close notes (${annotations.length})`) : isZh ? `打开批注 (${annotations.length})` : `Open notes (${annotations.length})`}
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="M4.5 5.5h11v8h-6l-3 2v-2h-2z" />
+                      <path d="M7.5 8.5h5" />
+                      <path d="M7.5 11h3.5" />
+                    </svg>
+                    <span>{isZh ? "批注" : "Notes"}</span>
+                    {annotations.length > 0 && <span className="reader-action-count">{annotations.length}</span>}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSummarize()}
+                    disabled={isSummarizing || !selectedArticle}
+                    className={isSummarizing ? "reader-action-button action-loading" : "reader-action-button"}
+                    title={isSummarizing ? (isZh ? "正在生成摘要" : "Generating summary") : hasActiveSummary ? (isZh ? "重新生成摘要" : "Regenerate summary") : isZh ? "生成摘要" : "Generate summary"}
+                    aria-label={isSummarizing ? (isZh ? "正在生成摘要" : "Generating summary") : hasActiveSummary ? (isZh ? "重新生成摘要" : "Regenerate summary") : isZh ? "生成摘要" : "Generate summary"}
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="M5 5.5h10" />
+                      <path d="M5 9h10" />
+                      <path d="M5 12.5h6.5" />
+                      <path d="M13 13.5h2.5" />
+                    </svg>
+                    <span>{isZh ? "摘要" : "Summary"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleTranslate()}
+                    disabled={isTranslating || !selectedArticle}
+                    className={isTranslating ? "reader-action-button action-loading" : "reader-action-button"}
+                    title={isTranslating ? (isZh ? "正在翻译" : "Translating") : isZh ? "翻译全文" : "Translate article"}
+                    aria-label={isTranslating ? (isZh ? "正在翻译" : "Translating") : isZh ? "翻译全文" : "Translate article"}
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="M4.5 6h6" />
+                      <path d="M7.5 4.5v1.5c0 2.8-1.1 5.2-3 6.8" />
+                      <path d="m4.8 10.8 2.7 3 2.7-3" />
+                      <path d="M12 7h3.5" />
+                      <path d="m13.7 5.5-1.7 8" />
+                      <path d="m11.8 11.8 1.9-2 1.9 2" />
+                    </svg>
+                    <span>{isZh ? "翻译" : "Translate"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="reader-action-button settings-toggle-btn"
+                    onClick={() => setShowSettings(true)}
+                    title={isZh ? "阅读设置" : "Reader settings"}
+                    aria-label={isZh ? "阅读设置" : "Reader settings"}
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="M10 4.5 11 3l2 .8.3 2a5.9 5.9 0 0 1 1.2.7l1.9-.8 1.4 1.4-.8 1.9c.3.4.5.8.7 1.2l2 .3.8 2-1.5 1-1.3-.9a6 6 0 0 1-1.4 1l-.2 1.7-2 .8-1-1.5a6 6 0 0 1-1.5 0L9 18l-2-.8-.2-1.7a6 6 0 0 1-1.4-1l-1.7.9-1.5-1 .8-2 .3-.1a6 6 0 0 1 0-1.4L2.5 9l1.4-1.4 1.9.8c.4-.3.8-.5 1.2-.7l.3-2 2-.8 1 1.5c.5-.1 1-.1 1.5 0Z" />
+                      <circle cx="10" cy="10" r="2.2" />
+                    </svg>
+                    <span>{isZh ? "设置" : "Settings"}</span>
+                  </button>
+                </div>
+              </div>
               <div className="reader-heading">
+                <h2>{displayTitle}</h2>
                 {selectedArticle && (
                   <div className="article-meta">
                     <span>{selectedArticle.author ?? "未知作者"}</span>
@@ -1230,79 +1688,43 @@ function App() {
                     </span>
                   </div>
                 )}
-                <h2>{displayTitle}</h2>
-              </div>
-              <div className="reader-actions">
-                <button
-                  type="button"
-                  onClick={() => void handleViewOriginal()}
-                  disabled={!originalArticleUrl}
-                >
-                  View Original
-                </button>
-                <button
-                  type="button"
-                  className={isAnnotationDrawerOpen ? "active" : ""}
-                  onClick={() => setIsAnnotationDrawerOpen((current) => !current)}
-                  disabled={!selectedArticle || !!readerPdfUrl}
-                >
-                  Annotations ({annotations.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSummarize()}
-                  disabled={isSummarizing || !selectedArticle}
-                  className={isSummarizing ? "action-loading" : ""}
-                >
-                  {isSummarizing ? "Summarizing..." : selectedArticle?.summary ? "Regenerate Summary" : "Summary"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleTranslate()}
-                  disabled={isTranslating || !selectedArticle}
-                  className={isTranslating ? "action-loading" : ""}
-                >
-                  {isTranslating ? "Translating..." : "Translate"}
-                </button>
-                <select
-                  className="lang-select"
-                  value={targetLang}
-                  onChange={(e) => setTargetLang(e.target.value)}
-                >
-                  <option value="zh">Chinese</option>
-                  <option value="en">English</option>
-                  <option value="ja">Japanese</option>
-                  <option value="ko">Korean</option>
-                </select>
-                <button
-                  type="button"
-                  className="settings-toggle-btn"
-                  onClick={() => setShowSettings(true)}
-                  title="LLM Settings"
-                >
-                  &#9881;
-                </button>
-                <label className="reader-font-control" title="Adjust reader font size">
-                  <span>Aa</span>
-                  <input
-                    type="range"
-                    min="0.8"
-                    max="1.4"
-                    step="0.05"
-                    value={readerFontScale}
-                    onChange={(event) => setReaderFontScale(normalizeReaderFontScale(Number(event.target.value)))}
-                  />
-                  <span>{Math.round(readerFontScale * 100)}%</span>
-                </label>
               </div>
             </div>
 
             {aiError && <div className="error-box">{aiError}</div>}
 
-            {selectedArticle?.summary && (
+            {(hasActiveSummary || isSummarizing) && selectedArticle && (
               <div className="ai-result-section">
-                <div className="ai-result-label">Summary</div>
-                <div className="ai-result-content">{selectedArticle.summary}</div>
+                <div className="ai-result-header">
+                  <div className="ai-result-label">{isZh ? "摘要" : "Summary"}</div>
+                  <select
+                    className="summary-lang-select"
+                    value={summaryLang}
+                    onChange={(event) => {
+                      const nextLang = event.target.value;
+                      isSummaryLangPinnedRef.current = nextLang !== targetLang;
+                      setSummaryLang(nextLang);
+                      if (!selectedArticle) return;
+                      const cachedSummary = summaryCache[selectedArticle.id]?.[nextLang];
+                      const currentArticleSummary = selectedArticle.summaryLang === nextLang ? selectedArticle.summary : null;
+                      if (!cachedSummary && !currentArticleSummary) {
+                        void handleSummarize(false, nextLang);
+                      }
+                    }}
+                  >
+                    <option value="zh">{isZh ? "中文" : "Chinese"}</option>
+                    <option value="en">{isZh ? "英文" : "English"}</option>
+                    <option value="ja">{isZh ? "日文" : "Japanese"}</option>
+                    <option value="ko">{isZh ? "韩文" : "Korean"}</option>
+                  </select>
+                </div>
+                <div className="ai-result-content">
+                  {hasActiveSummary
+                    ? activeSummary
+                    : isSummarizing
+                      ? (isZh ? "正在生成该语言的摘要..." : "Generating summary in this language...")
+                      : (isZh ? "当前语言还没有摘要。" : "No summary yet in this language.")}
+                </div>
               </div>
             )}
 
@@ -1314,52 +1736,57 @@ function App() {
                     className={readView === "original" ? "view-tab active" : "view-tab"}
                     onClick={() => setReadView("original")}
                   >
-                    Original
+                    {isZh ? "正文" : "Article"}
                   </button>
                   <button
                     type="button"
                     className={readView === "translation" ? "view-tab active" : "view-tab"}
                     onClick={() => setReadView("translation")}
                     disabled={!hasActiveTranslation}
-                    title={hasActiveTranslation ? "Show translation only" : "请先生成当前语言译文"}
+                    title={hasActiveTranslation ? (isZh ? "按原文段落对照显示翻译" : "Show translation aligned with each paragraph") : isZh ? "请先生成当前语言译文" : "Generate a translation first"}
                   >
-                    Translation
-                  </button>
-                  <button
-                    type="button"
-                    className={readView === "bilingual" ? "view-tab active" : "view-tab"}
-                    onClick={() => setReadView("bilingual")}
-                    disabled={!hasActiveTranslation}
-                    title={hasActiveTranslation ? "Show original and translation" : "请先生成当前语言译文"}
-                  >
-                    Bilingual
+                    {isZh ? "对照翻译" : "Translation"}
                   </button>
                 </div>
                 {!hasActiveTranslation && (
-                  <div className="view-tabs-hint">请先点击 Translate 生成当前所选语言的译文后再切换双语视图。</div>
+                  <div className="view-tabs-hint">{isZh ? "请先点击“翻译”生成当前所选语言的译文后再切换对照视图。" : "Generate a translation first, then switch to the paired translation view."}</div>
                 )}
               </div>
             )}
 
-            <div className={isAnnotationDrawerOpen ? "reader-content with-annotations" : "reader-content"}>
+            <div
+              ref={readerContentRef}
+              className={isAnnotationDrawerOpen ? "reader-content with-annotations" : "reader-content"}
+              onScroll={handleReaderContentScroll}
+            >
               {contentStatusLabel && (
                 <div className="content-status" aria-live="polite">
                   {contentStatusLabel}
                 </div>
               )}
               {readerPdfUrl || readerOriginalUrl ? (
-                <iframe
-                  className="reader-document-frame"
-                  src={readerPdfUrl ?? readerOriginalUrl ?? ""}
-                  title={readerPdfTitle ?? readerOriginalTitle ?? "Original Article"}
-                />
+                readerPdfUrl ? (
+                  <iframe
+                    className="reader-document-frame"
+                    src={readerPdfUrl}
+                    title={readerPdfTitle ?? (isZh ? "PDF 文档" : "PDF Document")}
+                  />
+                ) : (
+                  <iframe
+                    className="reader-document-frame"
+                    srcDoc={readerOriginalHtml ?? ""}
+                    title={readerOriginalTitle ?? (isZh ? "原始网页" : "Original Webpage")}
+                  />
+                )
               ) : (
                 <div className={isAnnotationDrawerOpen ? "reader-workspace with-annotations" : "reader-workspace"}>
                   <div
+                    ref={readerPaneRef}
                     className="reader-article-pane"
                     style={{ "--reader-font-scale": readerFontScale } as CSSProperties}
+                    onScroll={handleReaderPaneScroll}
                   >
-              {(readView === "original" || readView === "bilingual") && (
+              {readView === "original" && (
                 <div
                   ref={readerHtmlRef}
                   className="reader-html-content"
@@ -1369,33 +1796,48 @@ function App() {
                 />
               )}
 
-              {(readView === "translation" || readView === "bilingual") && hasActiveTranslation && selectedArticle?.translation && (
-                <div className="translation-block">
-                  <h3>Translation</h3>
-                  <p>{selectedArticle.translation}</p>
+              {readView === "translation" && hasActiveTranslation && (
+                <div className="translation-pairs">
+                  {translationPairs.map((pair) => (
+                    <section className="translation-pair" key={pair.id}>
+                      {pair.original && (
+                        <div
+                          className={`translation-original translation-original-${pair.original.kind}`}
+                          dangerouslySetInnerHTML={{ __html: pair.original.html }}
+                        />
+                      )}
+                      {pair.translation && (
+                        <div className="translation-rendered">
+                          {pair.translation.split("\n").map((line, index) => (
+                            <p key={`${pair.id}-line-${index}`}>{line}</p>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                  ))}
                 </div>
               )}
                   </div>
                   {isAnnotationDrawerOpen && selectedArticle && (
                     <aside ref={annotationPanelRef} className="annotation-panel">
                       <div className="annotation-panel-header">
-                        <strong>Annotations ({annotations.length})</strong>
+                        <strong>{isZh ? `批注 (${annotations.length})` : `Notes (${annotations.length})`}</strong>
                         <button type="button" onClick={() => setIsAnnotationDrawerOpen(false)}>
-                          Close
+                          {isZh ? "关闭" : "Close"}
                         </button>
                       </div>
                       <div className="annotation-toolbar">
                         <button type="button" onClick={beginCreateNote}>
-                          Add note
+                          {isZh ? "添加批注" : "Add note"}
                         </button>
                         <button type="button" onClick={() => void createHighlight()}>
-                          Highlight selection
+                          {isZh ? "高亮选中" : "Highlight selection"}
                         </button>
                       </div>
                       {annotationMessage && <p className="annotation-message">{annotationMessage}</p>}
                       {newNoteDraft !== null && (
                         <div className="annotation-editor">
-                          <label htmlFor="new-note">New article note</label>
+                          <label htmlFor="new-note">{isZh ? "新的文章批注" : "New article note"}</label>
                           <textarea
                             id="new-note"
                             value={newNoteDraft}
@@ -1405,18 +1847,18 @@ function App() {
                           />
                           <div className="annotation-actions">
                             <button className="primary-button" type="button" onClick={() => void saveNewNote()}>
-                              Save
+                              {isZh ? "保存" : "Save"}
                             </button>
                             <button type="button" onClick={() => setNewNoteDraft(null)}>
-                              Cancel
+                              {isZh ? "取消" : "Cancel"}
                             </button>
                           </div>
                         </div>
                       )}
-                      {annotations.length === 0 && <p className="annotation-empty">No annotations yet.</p>}
+                      {annotations.length === 0 && <p className="annotation-empty">{isZh ? "还没有批注。" : "No annotations yet."}</p>}
                       {annotations.map((annotation) => (
                         <div className="annotation-card" key={annotation.id}>
-                          <small>{annotation.kind === "highlight" ? "Highlight" : "Note"}</small>
+                          <small>{annotation.kind === "highlight" ? (isZh ? "高亮" : "Highlight") : isZh ? "批注" : "Note"}</small>
                           {annotation.selectedText && (
                             <button
                               className={`annotation-quote annotation-quote-${normalizeHighlightStyle(annotation.highlightStyle)}`}
@@ -1430,7 +1872,7 @@ function App() {
                           {editingAnnotationId === annotation.id ? (
                             <div className="annotation-editor">
                               <label htmlFor={`annotation-${annotation.id}`}>
-                                {annotation.kind === "highlight" ? "Optional highlight note" : "Note"}
+                                {annotation.kind === "highlight" ? (isZh ? "可选高亮说明" : "Optional highlight note") : isZh ? "批注" : "Note"}
                               </label>
                               <textarea
                                 id={`annotation-${annotation.id}`}
@@ -1441,7 +1883,7 @@ function App() {
                               />
                               <div className="annotation-actions">
                                 <button className="primary-button" type="button" onClick={() => void saveAnnotation(annotation.id)}>
-                                  Save
+                                  {isZh ? "保存" : "Save"}
                                 </button>
                                 <button
                                   type="button"
@@ -1451,7 +1893,7 @@ function App() {
                                     setAnnotationMessage(null);
                                   }}
                                 >
-                                  Cancel
+                                  {isZh ? "取消" : "Cancel"}
                                 </button>
                               </div>
                             </div>
@@ -1460,20 +1902,20 @@ function App() {
                               {annotation.noteText && <p>{highlightText(annotation.noteText, activeSearchQuery)}</p>}
                               {pendingDeleteId === annotation.id ? (
                                 <div className="annotation-delete-confirm">
-                                  <span>Delete this annotation?</span>
+                                  <span>{isZh ? "删除这条批注？" : "Delete this annotation?"}</span>
                                   <div className="annotation-actions">
                                     <button className="danger-button" type="button" onClick={() => void deleteAnnotation(annotation.id)}>
-                                      Confirm delete
+                                      {isZh ? "确认删除" : "Confirm delete"}
                                     </button>
                                     <button type="button" onClick={() => setPendingDeleteId(null)}>
-                                      Cancel
+                                      {isZh ? "取消" : "Cancel"}
                                     </button>
                                   </div>
                                 </div>
                               ) : (
                                 <div className="annotation-actions">
                                   <button type="button" onClick={() => beginEditAnnotation(annotation)}>
-                                    Edit
+                                    {isZh ? "编辑" : "Edit"}
                                   </button>
                                   <button
                                     type="button"
@@ -1483,7 +1925,7 @@ function App() {
                                       setNewNoteDraft(null);
                                     }}
                                   >
-                                    Delete
+                                    {isZh ? "删除" : "Delete"}
                                   </button>
                                 </div>
                               )}
@@ -1496,21 +1938,10 @@ function App() {
                 </div>
               )}
             </div>
-            <div className="reader-footer">
-              <button
-                type="button"
-                className="reader-back-button"
-                onClick={handleReaderBack}
-                disabled={readerHistory.length === 0}
-                title={readerHistory.length > 0 ? "返回上一篇阅读内容" : "当前没有可返回的文章"}
-              >
-                返回上一页
-              </button>
-            </div>
           </>
         ) : (
           <div className="empty-reader">
-            {isLoading ? "加载中..." : "请从左侧选择文章"}
+            {isLoading ? (isZh ? "加载中..." : "Loading...") : isZh ? "请从左侧选择文章" : "Select an article from the left"}
           </div>
         )}
       </article>
@@ -1519,45 +1950,109 @@ function App() {
       {showSettings && (
         <div className="modal-overlay">
           <div className="modal-content">
-            <h2>LLM Settings</h2>
+            <h2>{isZh ? "阅读设置" : "Reader Settings"}</h2>
             <p className="modal-desc">
-              Configure your LLM provider. Supports OpenAI, DeepSeek, Ollama, and any OpenAI-compatible API.
+              {isZh ? "配置 AI 服务、界面语言、翻译目标语言和阅读偏好。" : "Configure the AI provider, app language, translation target, and reading preferences."}
             </p>
 
             <div className="settings-form">
-              <label>
-                API Base URL
-                <input
-                  placeholder="https://api.openai.com or http://localhost:11434"
-                  value={settingsForm.baseUrl}
-                  onChange={(e) => setSettingsForm((f) => ({ ...f, baseUrl: e.target.value }))}
-                />
-              </label>
+              <section className="settings-section">
+                <div className="settings-section-heading">
+                  <strong>{isZh ? "应用版本" : "App Version"}</strong>
+                  <span>{isZh ? "切换整个应用的中文或英文界面。" : "Switch the entire app between Chinese and English."}</span>
+                </div>
+                <label>
+                  {isZh ? "界面语言" : "Interface Language"}
+                  <select
+                    className="settings-select"
+                    value={settingsLanguage}
+                    onChange={(e) => setSettingsLanguage(e.target.value as AppLanguage)}
+                  >
+                    <option value="zh">中文</option>
+                    <option value="en">English</option>
+                  </select>
+                </label>
+              </section>
+              <section className="settings-section">
+                <div className="settings-section-heading">
+                  <strong>{isZh ? "AI 服务" : "AI Provider"}</strong>
+                  <span>{isZh ? "用于摘要、全文翻译和选中文本翻译。" : "Used by summary, full-article translation, and selection translation."}</span>
+                </div>
+                <label>
+                  API Base URL
+                  <input
+                    placeholder={isZh ? "https://api.openai.com 或 http://localhost:11434" : "https://api.openai.com or http://localhost:11434"}
+                    value={settingsForm.baseUrl}
+                    onChange={(e) => setSettingsForm((f) => ({ ...f, baseUrl: e.target.value }))}
+                  />
+                </label>
 
-              <label>
-                API Key
-                <input
-                  type="password"
-                  placeholder="sk-... (leave empty for Ollama)"
-                  value={settingsForm.apiKey}
-                  onChange={(e) => setSettingsForm((f) => ({ ...f, apiKey: e.target.value }))}
-                />
-              </label>
+                <label>
+                  API Key
+                  <input
+                    type="password"
+                    placeholder={isZh ? "sk-...（使用 Ollama 可留空）" : "sk-... (leave empty for Ollama)"}
+                    value={settingsForm.apiKey}
+                    onChange={(e) => setSettingsForm((f) => ({ ...f, apiKey: e.target.value }))}
+                  />
+                </label>
 
-              <label>
-                Model Name
-                <input
-                  placeholder="gpt-3.5-turbo, deepseek-chat, llama3"
-                  value={settingsForm.modelName}
-                  onChange={(e) => setSettingsForm((f) => ({ ...f, modelName: e.target.value }))}
-                />
-              </label>
+                <label>
+                  Model Name
+                  <input
+                    placeholder="gpt-4o-mini, deepseek-chat, llama3"
+                    value={settingsForm.modelName}
+                    onChange={(e) => setSettingsForm((f) => ({ ...f, modelName: e.target.value }))}
+                  />
+                </label>
+              </section>
+
+              <section className="settings-section">
+                <div className="settings-section-heading">
+                  <strong>{isZh ? "翻译" : "Translation"}</strong>
+                  <span>{isZh ? "设置“翻译”操作默认使用的目标语言。" : "Choose the default target language used by the Translate action."}</span>
+                </div>
+                <label>
+                  {isZh ? "目标语言" : "Target Language"}
+                  <select
+                    className="settings-select"
+                    value={targetLang}
+                    onChange={(e) => setTargetLang(e.target.value)}
+                  >
+                    <option value="zh">{isZh ? "中文" : "Chinese"}</option>
+                    <option value="en">{isZh ? "英文" : "English"}</option>
+                    <option value="ja">{isZh ? "日文" : "Japanese"}</option>
+                    <option value="ko">{isZh ? "韩文" : "Korean"}</option>
+                  </select>
+                </label>
+              </section>
+
+              <section className="settings-section">
+                <div className="settings-section-heading">
+                  <strong>{isZh ? "阅读" : "Reading"}</strong>
+                  <span>{isZh ? "调整当前会话的文章字号。" : "Adjust the article text size for the current session."}</span>
+                </div>
+                <label className="settings-range-field">
+                  <span>{isZh ? "阅读字号" : "Reader Font Size"}</span>
+                  <div className="settings-range-control">
+                    <input
+                      type="range"
+                      min="0.8"
+                      max="1.4"
+                      step="0.05"
+                      value={readerFontScale}
+                      onChange={(event) => setReaderFontScale(normalizeReaderFontScale(Number(event.target.value)))}
+                    />
+                    <strong>{Math.round(readerFontScale * 100)}%</strong>
+                  </div>
+                </label>
+              </section>
 
               <div className="modal-actions">
                 <button type="button" className="primary-button" onClick={handleSaveSettings} disabled={isSavingSettings}>
-                  {isSavingSettings ? "Saving..." : "Save"}
+                  {isSavingSettings ? (isZh ? "保存中..." : "Saving...") : isZh ? "保存" : "Save"}
                 </button>
-                <button type="button" onClick={() => setShowSettings(false)}>Cancel</button>
+                <button type="button" onClick={() => setShowSettings(false)}>{isZh ? "取消" : "Cancel"}</button>
               </div>
             </div>
           </div>

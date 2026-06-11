@@ -1,13 +1,12 @@
 import { useEffect, useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Article, Feed, SyncStatus, SyncReport, SyncConfig } from "../types";
+import type { Article, Feed, SyncStatus, SyncReport, SyncConfig, AppLanguage } from "../types";
 
 type Props = {
   feeds: Feed[];
   allArticleCount: number;
   allUnreadCount: number;
-  favoriteCount: number;
-  readLaterCount: number;
+  appLanguage: AppLanguage;
   selectedFeedId: string;
   syncStatus: SyncStatus | null;
   onSelectFeed: (id: string) => void;
@@ -19,14 +18,14 @@ export function Sidebar({
   feeds,
   allArticleCount,
   allUnreadCount,
-  favoriteCount,
-  readLaterCount,
+  appLanguage,
   selectedFeedId,
   syncStatus,
   onSelectFeed,
   onFeedsChange,
   onSyncStatusChange,
 }: Props) {
+  const isZh = appLanguage === "zh";
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [addUrl, setAddUrl] = useState("");
   const [isAdding, setIsAdding] = useState(false);
@@ -69,7 +68,7 @@ export function Sidebar({
       setSyncConfig(updated);
       setShowSyncConfig(false);
     } catch (error) {
-      console.error("保存同步配置失败", error);
+      console.error(isZh ? "保存同步配置失败" : "Failed to save sync config", error);
     } finally {
       setIsSavingSyncConfig(false);
     }
@@ -88,7 +87,7 @@ export function Sidebar({
       if (typeof error === "string" || error instanceof Error) {
         setAddError(error.toString());
       } else {
-        setAddError("添加订阅失败");
+        setAddError(isZh ? "添加订阅失败" : "Failed to add subscription");
       }
     } finally {
       setIsAdding(false);
@@ -102,7 +101,7 @@ export function Sidebar({
       await invoke<Article[]>("refresh_feed", { feedId });
       onFeedsChange();
     } catch (error) {
-      console.error("刷新失败", error);
+      console.error(isZh ? "刷新失败" : "Refresh failed", error);
     } finally {
       setRefreshingFeedId(null);
     }
@@ -115,7 +114,7 @@ export function Sidebar({
       onSyncStatusChange();
       onFeedsChange();
     } catch (error) {
-      console.error("同步失败", error);
+      console.error(isZh ? "同步失败" : "Sync failed", error);
     } finally {
       setIsSyncing(false);
     }
@@ -127,7 +126,7 @@ export function Sidebar({
       onSyncStatusChange();
       onFeedsChange();
     } catch (error) {
-      console.error("重试失败", error);
+      console.error(isZh ? "重试失败" : "Retry failed", error);
     }
   }
 
@@ -141,17 +140,19 @@ export function Sidebar({
       if (!filePath || Array.isArray(filePath)) return;
 
       setIsImporting(true);
-      setOpmlStatus("正在导入 OPML...");
+      setOpmlStatus(isZh ? "正在导入 OPML..." : "Importing OPML...");
       setOpmlError(null);
 
       const importedFeeds = await invoke<Feed[]>("import_opml", { filePath });
-      setOpmlStatus(`已导入 ${importedFeeds.length} 个订阅源`);
+      setOpmlStatus(isZh ? `已导入 ${importedFeeds.length} 个订阅源` : `Imported ${importedFeeds.length} subscriptions`);
       onFeedsChange();
     } catch (error) {
       const message =
         typeof error === "string" || error instanceof Error
           ? error.toString()
-          : "导入 OPML 失败";
+          : isZh
+            ? "导入 OPML 失败"
+            : "Failed to import OPML";
       setOpmlError(message);
       setOpmlStatus(null);
     } finally {
@@ -169,43 +170,22 @@ export function Sidebar({
       if (!filePath) return;
 
       await invoke("export_opml", { filePath });
-      setOpmlStatus("OPML 导出成功");
+      setOpmlStatus(isZh ? "OPML 导出成功" : "OPML exported successfully");
       setOpmlError(null);
     } catch {
-      setOpmlError("导出 OPML 失败");
+      setOpmlError(isZh ? "导出 OPML 失败" : "Failed to export OPML");
     }
   }
 
   const allFeed = {
     id: "all",
-    title: "全部订阅",
+    title: isZh ? "全部订阅" : "All Subscriptions",
     url: "",
     siteUrl: null,
     unread: allUnreadCount,
     total: allArticleCount,
     lastSyncAt: null,
   };
-  const smartFeeds = [
-    {
-      id: "favorites",
-      title: "Favorites",
-      url: "",
-      siteUrl: null,
-      unread: favoriteCount,
-      total: favoriteCount,
-      lastSyncAt: null,
-    },
-    {
-      id: "read-later",
-      title: "Read Later",
-      url: "",
-      siteUrl: null,
-      unread: readLaterCount,
-      total: readLaterCount,
-      lastSyncAt: null,
-    },
-  ];
-
   const failedCount = syncStatus?.failedFeeds.length ?? 0;
   const isRunning = syncStatus?.phase === "running" || isSyncing;
 
@@ -215,17 +195,17 @@ export function Sidebar({
         <div className="brand-mark">M</div>
         <div>
           <h1>Mercury</h1>
-          <p>AI Reader</p>
+          <p>{isZh ? "AI 阅读器" : "AI Reader"}</p>
         </div>
       </div>
 
       <section className="panel-section">
         <div className="section-header">
-          <div className="section-title">订阅源</div>
+          <div className="section-title">{isZh ? "订阅源" : "Subscriptions"}</div>
           <div className="section-actions">
             <button
               className="icon-button"
-              title="同步全部"
+              title={isZh ? "同步全部" : "Sync all"}
               onClick={handleStartSync}
               disabled={isRunning}
             >
@@ -233,14 +213,14 @@ export function Sidebar({
             </button>
             <button
               className="icon-button"
-              title="添加订阅"
+              title={isZh ? "添加订阅" : "Add subscription"}
               onClick={() => setShowAddDialog(true)}
             >
               +
             </button>
             <button
               className="icon-button"
-              title={isImporting ? "正在导入 OPML" : "导入 OPML"}
+              title={isImporting ? (isZh ? "正在导入 OPML" : "Importing OPML") : isZh ? "导入 OPML" : "Import OPML"}
               onClick={handleImportOpml}
               disabled={isImporting}
             >
@@ -248,7 +228,7 @@ export function Sidebar({
             </button>
             <button
               className="icon-button"
-              title="导出 OPML"
+              title={isZh ? "导出 OPML" : "Export OPML"}
               onClick={handleExportOpml}
             >
               &#8595;
@@ -258,15 +238,15 @@ export function Sidebar({
 
         {isRunning && syncStatus && (
           <div className="sync-status-bar">
-            同步中 ({syncStatus.completedFeeds}/{syncStatus.totalFeeds})
+            {(isZh ? "同步中" : "Syncing")} ({syncStatus.completedFeeds}/{syncStatus.totalFeeds})
           </div>
         )}
 
         {failedCount > 0 && !isRunning && (
           <div className="sync-failed-bar">
-            <span>{failedCount} 个订阅源同步失败</span>
+            <span>{isZh ? `${failedCount} 个订阅源同步失败` : `${failedCount} subscriptions failed to sync`}</span>
             <button className="retry-button" onClick={handleRetryFailed}>
-              重试
+              {isZh ? "重试" : "Retry"}
             </button>
           </div>
         )}
@@ -278,7 +258,7 @@ export function Sidebar({
         )}
 
         <div className="feed-list">
-          {[allFeed, ...smartFeeds, ...feeds].map((feed) => (
+          {[allFeed, ...feeds].map((feed) => (
             <div
               key={feed.id}
               className={
@@ -306,20 +286,24 @@ export function Sidebar({
                         ? "refresh-button refreshing"
                         : "refresh-button"
                     }
-                    title="刷新"
+                    title={isZh ? "刷新" : "Refresh"}
                     onClick={(event) => handleRefreshFeed(feed.id, event)}
                   >
                     &#8635;
                   </button>
                 )}
                 {feed.id === "all" ? (
-                  <span className="badge badge-double" title={`未读 ${allFeed.unread} 篇，共 ${allFeed.total} 篇`}>
+                  <span className="badge badge-double" title={isZh ? `未读 ${allFeed.unread} 篇，共 ${allFeed.total} 篇` : `${allFeed.unread} unread, ${allFeed.total} total`}>
                     <span>{allFeed.unread}</span>
                     <span className="badge-divider">/</span>
                     <span>{allFeed.total}</span>
                   </span>
                 ) : (
-                  feed.unread > 0 && <span className="badge">{feed.unread}</span>
+                  <span className="badge badge-double" title={isZh ? `未读 ${feed.unread} 篇，共 ${feed.total} 篇` : `${feed.unread} unread, ${feed.total} total`}>
+                    <span>{feed.unread}</span>
+                    <span className="badge-divider">/</span>
+                    <span>{feed.total}</span>
+                  </span>
                 )}
               </span>
             </div>
@@ -329,10 +313,10 @@ export function Sidebar({
 
       <section className="panel-section sync-config-section">
         <div className="section-header">
-          <div className="section-title">同步设置</div>
+          <div className="section-title">{isZh ? "同步设置" : "Sync Settings"}</div>
           <button
             className="icon-button"
-            title="展开/收起"
+            title={isZh ? "展开/收起" : "Expand/Collapse"}
             onClick={() => setShowSyncConfig(!showSyncConfig)}
           >
             {showSyncConfig ? "−" : "+"}
@@ -341,7 +325,7 @@ export function Sidebar({
         {showSyncConfig && (
           <div className="sync-config-panel">
             <label className="sync-config-row">
-              <span>自动同步</span>
+              <span>{isZh ? "自动同步" : "Auto sync"}</span>
               <input
                 type="checkbox"
                 checked={syncConfig.enabled}
@@ -351,7 +335,7 @@ export function Sidebar({
               />
             </label>
             <label className="sync-config-row">
-              <span>间隔（分钟）</span>
+              <span>{isZh ? "间隔（分钟）" : "Interval (min)"}</span>
               <input
                 type="number"
                 min={1}
@@ -366,7 +350,7 @@ export function Sidebar({
               />
             </label>
             <label className="sync-config-row">
-              <span>最大重试次数</span>
+              <span>{isZh ? "最大重试次数" : "Retry limit"}</span>
               <input
                 type="number"
                 min={0}
@@ -386,7 +370,7 @@ export function Sidebar({
               disabled={isSavingSyncConfig}
               style={{ marginTop: 8, width: "100%" }}
             >
-              {isSavingSyncConfig ? "保存中..." : "保存配置"}
+              {isSavingSyncConfig ? (isZh ? "保存中..." : "Saving...") : isZh ? "保存配置" : "Save settings"}
             </button>
           </div>
         )}
@@ -395,9 +379,9 @@ export function Sidebar({
       {showAddDialog && (
         <div className="dialog-overlay" onClick={() => setShowAddDialog(false)}>
           <div className="dialog" onClick={(event) => event.stopPropagation()}>
-            <h3>添加订阅源</h3>
+            <h3>{isZh ? "添加订阅源" : "Add Subscription"}</h3>
             <input
-              placeholder="输入 RSS/Atom 地址..."
+              placeholder={isZh ? "输入 RSS/Atom 地址..." : "Enter RSS/Atom feed URL..."}
               value={addUrl}
               onChange={(event) => setAddUrl(event.target.value)}
               onKeyDown={(event) => event.key === "Enter" && void handleAddFeed()}
@@ -405,13 +389,13 @@ export function Sidebar({
             />
             {addError && <p className="error-text">{addError}</p>}
             <div className="dialog-actions">
-              <button onClick={() => setShowAddDialog(false)}>取消</button>
+              <button onClick={() => setShowAddDialog(false)}>{isZh ? "取消" : "Cancel"}</button>
               <button
                 className="primary-button"
                 onClick={() => void handleAddFeed()}
                 disabled={isAdding}
               >
-                {isAdding ? "添加中..." : "添加"}
+                {isAdding ? (isZh ? "添加中..." : "Adding...") : isZh ? "添加" : "Add"}
               </button>
             </div>
           </div>

@@ -1,9 +1,12 @@
+export type AppLanguage = "zh" | "en";
+
 export type Feed = {
   id: string;
   title: string;
   url: string;
   siteUrl: string | null;
   unread: number;
+  total: number;
   lastSyncAt: string | null;
 };
 
@@ -73,6 +76,7 @@ export type Article = {
   contentFetchError: string | null;
   finalUrl: string | null;
   summary: string | null;
+  summaryLang: string | null;
   translation: string | null;
   translationLang: string | null;
   isRead: boolean;

@@ -252,6 +252,7 @@ fn save_or_update_opml_feed(app: &AppHandle, opml_feed: &OpmlFeed) -> Result<Fee
         url: opml_feed.url.clone(),
         site_url,
         unread: 0,
+        total: 0,
         last_sync_at: None,
     })
 }
@@ -263,7 +264,8 @@ fn find_existing_feed(app: &AppHandle, url: &str) -> Result<Option<Feed>, String
             "
             SELECT f.id, f.title, f.url, f.site_url,
                    COUNT(CASE WHEN a.read_status = 0 THEN 1 END) as unread,
-                   f.last_sync_at
+                   f.last_sync_at,
+                   COUNT(a.id) as total
             FROM feeds f
             LEFT JOIN articles a ON a.feed_id = f.id
             WHERE f.url = ?1
@@ -300,6 +302,9 @@ fn find_existing_feed(app: &AppHandle, url: &str) -> Result<Option<Feed>, String
             last_sync_at: row
                 .get(5)
                 .map_err(|error| format!("Failed to read last sync time: {error}"))?,
+            total: row
+                .get(6)
+                .map_err(|error| format!("Failed to read total count: {error}"))?,
         }));
     }
 

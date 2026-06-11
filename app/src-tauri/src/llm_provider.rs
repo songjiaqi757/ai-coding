@@ -1,3 +1,6 @@
+use std::error::Error as StdError;
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +37,48 @@ struct ChatChoiceMessage {
     content: String,
 }
 
+fn reqwest_error_details(error: &reqwest::Error, url: &str) -> String {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "unknown"
+    };
+
+    let mut parts = vec![
+        format!("type={category}"),
+        format!("url={url}"),
+        format!("message={error}"),
+    ];
+
+    if let Some(status) = error.status() {
+        parts.push(format!("status={status}"));
+    }
+
+    if let Some(error_url) = error.url() {
+        parts.push(format!("reqwest_url={error_url}"));
+    }
+
+    let mut sources = Vec::new();
+    let mut current = error.source();
+    while let Some(source) = current {
+        sources.push(source.to_string());
+        current = source.source();
+    }
+    if !sources.is_empty() {
+        parts.push(format!("sources={}", sources.join(" | ")));
+    }
+
+    parts.join("; ")
+}
+
 pub fn call_llm(config: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
     let url = format!(
         "{}/v1/chat/completions",
@@ -57,7 +102,13 @@ pub fn call_llm(config: &LlmConfig, system_prompt: &str, user_prompt: &str) -> R
         messages,
     };
 
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .http1_only()
+        .user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("Failed to build LLM HTTP client: {}", reqwest_error_details(&error, &url)))?;
     let response = client
         .post(&url)
         .header(
@@ -67,7 +118,7 @@ pub fn call_llm(config: &LlmConfig, system_prompt: &str, user_prompt: &str) -> R
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
-        .map_err(|e| format!("LLM request failed: {e}"))?;
+        .map_err(|error| format!("LLM request failed: {}", reqwest_error_details(&error, &url)))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -77,7 +128,7 @@ pub fn call_llm(config: &LlmConfig, system_prompt: &str, user_prompt: &str) -> R
 
     let chat_response: ChatResponse = response
         .json()
-        .map_err(|e| format!("Failed to parse LLM response: {e}"))?;
+        .map_err(|error| format!("Failed to parse LLM response: {}", reqwest_error_details(&error, &url)))?;
 
     chat_response
         .choices

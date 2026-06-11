@@ -1,5 +1,5 @@
 import type { FormEvent, ReactNode } from "react";
-import type { Article, ReadFilter } from "../types";
+import type { Article, ReadFilter, AppLanguage } from "../types";
 
 type SearchScope = "all" | "feed";
 
@@ -8,6 +8,7 @@ type Props = {
   totalCount: number;
   unreadCount: number;
   readCount: number;
+  appLanguage: AppLanguage;
   selectedArticleId: string | null;
   isLoading: boolean;
   readFilter: ReadFilter;
@@ -36,6 +37,7 @@ export function ArticleList({
   totalCount,
   unreadCount,
   readCount,
+  appLanguage,
   selectedArticleId,
   isLoading,
   readFilter,
@@ -58,23 +60,26 @@ export function ArticleList({
   onMarkCurrentFeedRead,
   highlightText,
 }: Props) {
+  const isZh = appLanguage === "zh";
   const currentFilterCount =
     readFilter === "all" ? totalCount : readFilter === "unread" ? unreadCount : readCount;
   const countLabel = isLoading
-    ? "加载中..."
+    ? isZh ? "加载中..." : "Loading..."
     : searchQuery.trim()
-      ? `当前 ${articles.length} 篇，筛选范围 ${currentFilterCount} 篇，未读 ${unreadCount} 篇`
+      ? isZh
+        ? `当前 ${articles.length} 篇，筛选范围 ${currentFilterCount} 篇，未读 ${unreadCount} 篇`
+        : `${articles.length} current, ${currentFilterCount} in scope, ${unreadCount} unread`
       : readFilter === "all"
-        ? `共 ${totalCount} 篇，未读 ${unreadCount} 篇`
+        ? isZh ? `共 ${totalCount} 篇，未读 ${unreadCount} 篇` : `${totalCount} total, ${unreadCount} unread`
         : readFilter === "unread"
-          ? `未读 ${unreadCount} 篇`
-          : `已读 ${readCount} 篇`;
+          ? isZh ? `未读 ${unreadCount} 篇` : `${unreadCount} unread`
+          : isZh ? `已读 ${readCount} 篇` : `${readCount} read`;
 
   return (
     <section className="article-list">
       <div className="toolbar">
         <div>
-          <h2>Articles</h2>
+          <h2>{isZh ? "文章" : "Articles"}</h2>
           <p>{countLabel}</p>
         </div>
         <button
@@ -83,7 +88,7 @@ export function ArticleList({
           onClick={onMarkCurrentFeedRead}
           disabled={isUpdatingReadStatus || unreadCount === 0}
         >
-          全部标为已读
+          {isZh ? "全部标为已读" : "Mark all read"}
         </button>
       </div>
 
@@ -96,10 +101,10 @@ export function ArticleList({
             onClick={() => onReadFilterChange(value)}
           >
             {value === "all"
-              ? `全部 ${totalCount}`
+              ? isZh ? `全部 ${totalCount}` : `All ${totalCount}`
               : value === "unread"
-                ? `未读 ${unreadCount}`
-                : `已读 ${readCount}`}
+                ? isZh ? `未读 ${unreadCount}` : `Unread ${unreadCount}`
+                : isZh ? `已读 ${readCount}` : `Read ${readCount}`}
           </button>
         ))}
       </div>
@@ -113,13 +118,13 @@ export function ArticleList({
               onSearchQueryChange(value);
               if (!value.trim()) onClearSearch();
             }}
-            placeholder="搜索文章和批注..."
+            placeholder={isZh ? "搜索文章和批注..." : "Search articles and notes..."}
           />
           {searchQuery && (
             <button
               className="search-clear-button"
               type="button"
-              aria-label="Clear search"
+              aria-label={isZh ? "清空搜索" : "Clear search"}
               onClick={onClearSearch}
             >
               <span className="search-clear-icon" aria-hidden="true" />
@@ -130,20 +135,20 @@ export function ArticleList({
           value={searchScope}
           onChange={(event) => onSearchScopeChange(event.target.value as SearchScope)}
         >
-          <option value="all">全部文章</option>
-          <option value="feed">当前订阅源</option>
+          <option value="all">{isZh ? "全部文章" : "All articles"}</option>
+          <option value="feed">{isZh ? "当前订阅源" : "Current feed"}</option>
         </select>
-        <button type="submit">搜索</button>
+        <button type="submit">{isZh ? "搜索" : "Search"}</button>
       </form>
 
       {activeSearchQuery && (
         <div className="search-navigation">
           <button type="button" disabled={searchMatchLabel === "0 / 0"} onClick={onPreviousSearchMatch}>
-            Previous
+            {isZh ? "上一个" : "Previous"}
           </button>
           <span>{searchMatchLabel}</span>
           <button type="button" disabled={searchMatchLabel === "0 / 0"} onClick={onNextSearchMatch}>
-            Next
+            {isZh ? "下一个" : "Next"}
           </button>
         </div>
       )}
@@ -151,7 +156,7 @@ export function ArticleList({
       <div className="cards">
         {articles.length === 0 && !isLoading && (
           <div className="empty-state">
-            暂无文章，请添加订阅源或刷新
+            {isZh ? "暂无文章，请添加订阅源或刷新" : "No articles yet. Add a subscription or refresh."}
           </div>
         )}
         {articles.map((article) => (
@@ -169,25 +174,32 @@ export function ArticleList({
           >
             <div className="article-card-header">
               <span className="article-meta">
-                <span className={article.isRead ? "read-state" : "read-state unread"}>
-                  {article.isRead ? "已读" : "未读"}
-                </span>
-                <span>{highlightText(article.author ?? "未知作者")}</span>
+                {!article.isRead && <span className="read-state unread">{isZh ? "未读" : "Unread"}</span>}
+                <span>{highlightText(article.author ?? (isZh ? "未知作者" : "Unknown author"))}</span>
                 <span>
                   {article.publishedAt
                     ? new Date(article.publishedAt).toLocaleDateString("zh-CN")
                     : ""}
                 </span>
-              </span>
+                </span>
               <button
                 type="button"
                 className="read-toggle"
+                aria-label={article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}
+                title={article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}
                 onClick={(event) => {
                   event.stopPropagation();
                   onToggleReadStatus(article);
                 }}
               >
-                标为{article.isRead ? "未读" : "已读"}
+                <svg aria-hidden="true" viewBox="0 0 20 20">
+                  {article.isRead ? (
+                    <path d="M6.5 6.5h7v7m0-7-7 7" />
+                  ) : (
+                    <path d="m5 10 3.2 3.2L15 6.5" />
+                  )}
+                </svg>
+                <span>{article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}</span>
               </button>
             </div>
             <button
@@ -196,14 +208,14 @@ export function ArticleList({
               onClick={() => onSelectArticle(article.id)}
             >
               <span className="article-card-title">{highlightText(article.title)}</span>
-              <span className="article-card-excerpt">{highlightText(article.excerpt || article.content || "No article preview available.")}</span>
+              <span className="article-card-excerpt">{highlightText(article.excerpt || article.content || (isZh ? "暂无文章预览。" : "No article preview available."))}</span>
             </button>
             <div className="article-marking-actions">
               <button
                 className={article.isFavorite ? "marking-icon-button favorite active" : "marking-icon-button favorite"}
                 type="button"
-                aria-label={article.isFavorite ? "Remove from favorites" : "Add to favorites"}
-                title={article.isFavorite ? "Remove from favorites" : "Add to favorites"}
+                aria-label={article.isFavorite ? (isZh ? "取消收藏" : "Remove from favorites") : isZh ? "加入收藏" : "Add to favorites"}
+                title={article.isFavorite ? (isZh ? "取消收藏" : "Remove from favorites") : isZh ? "加入收藏" : "Add to favorites"}
                 onClick={(event) => {
                   event.stopPropagation();
                   onToggleFavorite(article);
@@ -216,8 +228,8 @@ export function ArticleList({
               <button
                 className={article.readLater ? "marking-icon-button read-later active" : "marking-icon-button read-later"}
                 type="button"
-                aria-label={article.readLater ? "Remove from read later" : "Add to read later"}
-                title={article.readLater ? "Remove from read later" : "Add to read later"}
+                aria-label={article.readLater ? (isZh ? "取消稍后读" : "Remove from read later") : isZh ? "加入稍后读" : "Add to read later"}
+                title={article.readLater ? (isZh ? "取消稍后读" : "Remove from read later") : isZh ? "加入稍后读" : "Add to read later"}
                 onClick={(event) => {
                   event.stopPropagation();
                   onToggleReadLater(article);
