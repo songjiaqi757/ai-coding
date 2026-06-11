@@ -1,9 +1,9 @@
 # Feed Refresh Save Article 测试记录
 
 > 测试人：C（H2Ozer0）
-> 测试日期：2026-06-11
+> 测试日期：2026-06-11（更新）
 > 分支：`kht-feed-refresh-save-article`
-> 基于：`origin/main` + A (`fix/wrr-feed-refresh-save-article`) + B (`feature/hs2`)
+> 基于：`origin/main` + A (`fix/wrr-feed-refresh-save-article`) + B (`feature/hs2` @ `eeae0c2`)
 
 ---
 
@@ -43,16 +43,16 @@ A（`fix/wrr-feed-refresh-save-article`）移除了 `annotations` 表的 `highli
 
 ## 2. B 的前端改动分析
 
-B（`feature/hs2`，提交 `7acacce`）对前端做了简化和修复：
+B（`feature/hs2`，最新提交 `eeae0c2`）对前端做了大幅改动：
 
 ### 主要改动
 
-1. **简化搜索**：移除服务端搜索（`search_articles`），改用前端 `useMemo` 对标题/作者进行本地过滤
-2. **移除 Smart Feeds**：移除 Favorites / Read Later 虚拟订阅源，简化 feed 列表
-3. **修复 Saved Articles 刷新**：添加 `isLocalSavedFeed()` 检查，Saved Articles 不显示刷新按钮
+1. **恢复 Smart Feeds**：重新引入 Favorites / Read Later 虚拟订阅源
+2. **简化搜索**：移除服务端搜索（`search_articles`），改用前端 `useMemo` 对标题/作者进行本地过滤
+3. **修复 Saved Articles 刷新**：`Sidebar` 中 `isLocalOnlyFeed()` 检查，Saved Articles 不显示刷新按钮
 4. **错误展示**：刷新失败和同步失败时在侧边栏显示错误信息
-5. **简化 Annotation**：移除 annotation drawer、highlight color/style 选择器、View Original 按钮、font scale 控件
-6. **收藏/稍后读按钮**：从 SVG 图标改为文字按钮（"收藏"/"已收藏"/"稍后读"/"稍后读中"）
+5. **简化 Annotation**：移除 highlight color/style 选择器
+6. **收藏/稍后读按钮**：文字按钮（"收藏"/"已收藏"/"稍后读"/"稍后读中"）
 
 ### B 验收清单
 
@@ -63,7 +63,43 @@ B（`feature/hs2`，提交 `7acacce`）对前端做了简化和修复：
 
 ---
 
-## 3. C 的测试 Feed 矩阵
+## 3. C 的修复：全部视图过滤 Saved Articles
+
+### 问题现象
+
+用户反馈"刷新订阅源之后还是会出现 save article"。
+
+### 根因分析
+
+后端没有 bug——`refresh_feed`、`sync_one_feed`、`start_sync`、`load_all_sync_targets` 四处都正确拦截了 `saved` feed，刷新不会往 saved feed 里插入文章。
+
+真正的问题是前端 `loadData` 里的"全部文章"视图：当 `selectedFeedId === "all"` 时，`listFeedId` 被设为 `null`，后端 `list_articles(null)` 返回所有 feed 的文章，**包括 Saved Articles**。用户在"全部"视图下看到 Saved Articles 的文章，误以为是刷新造成的。
+
+### 修复内容
+
+**文件**：`app/src/App.tsx` 的 `loadData` 函数
+
+**改动**：在获取 `allArticles` 和 `nextArticles` 后，过滤掉 `feedId === "saved"` 的文章：
+
+```typescript
+const allArticles = allArticlesRaw.filter((a) => a.feedId !== "saved");
+const nextArticles = listFeedId === null
+  ? nextArticlesRaw.filter((a) => a.feedId !== "saved")
+  : nextArticlesRaw;
+```
+
+- `allArticles` 用于计算 `allArticleCount` 和 `allUnreadCount`，不应包含手动抓取的 saved 文章
+- `nextArticles` 在"全部"/"收藏"/"稍后读"视图下同样排除 saved 文章
+- 当用户明确选择了 Saved Articles feed 时，`listFeedId` 不是 `null`，不会触发过滤
+
+### 验证
+
+| 检查项 | 结果 |
+|--------|------|
+| `cargo check` | 通过 |
+| `pnpm build` (tsc + vite) | 通过 |
+
+---
 
 ### 测试 Feed 清单
 
@@ -121,9 +157,10 @@ cd app && pnpm build                # 通过
 
 ## 5. 结论
 
-A 和 B 的改动合并后：
+A 和 B 的改动合并后，C 补充修复了一个前端显示问题：
 
 - **后端**：`save_articles` 使用 `INSERT OR IGNORE` + `UNIQUE(feed_id, url)` 去重，Saved Articles 在 `refresh_feed`、`sync_one_feed`、`start_sync`、`load_all_sync_targets` 四处均被正确拦截，不会参与远程同步。已读/收藏/稍后读/摘要/翻译等本地状态不会被刷新覆盖。
 - **前端**：Saved Articles 不显示刷新按钮，刷新/同步失败时有错误提示，搜索简化为前端过滤，收藏/稍后读按钮改为文字样式。
+- **C 的修复**：`loadData` 中"全部文章"视图现在排除 `feedId === "saved"` 的文章，解决"刷新后出现 save article"的显示问题。
 
 **可以合入 main。**
