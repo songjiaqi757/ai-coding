@@ -1,0 +1,38 @@
+- main [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: M
+      - generic [ref=e7]:
+        - heading "Mercury" [level=1] [ref=e8]
+        - paragraph [ref=e9]: AI Reader
+    - generic [ref=e10]:
+      - generic [ref=e11]:
+        - generic [ref=e12]: 订阅源
+        - generic [ref=e13]:
+          - button "↻" [ref=e14] [cursor=pointer]
+          - button "+" [ref=e15] [cursor=pointer]
+          - button "↑" [ref=e16] [cursor=pointer]
+          - button "↓" [ref=e17] [cursor=pointer]
+      - generic [ref=e19]:
+        - button "全部订阅" [ref=e20] [cursor=pointer]
+        - generic "未读 0 篇，共 0 篇" [ref=e22]:
+          - generic [ref=e23]: "0"
+          - generic [ref=e24]: /
+          - generic [ref=e25]: "0"
+    - generic [ref=e27]:
+      - generic [ref=e28]: 同步设置
+      - button "+" [ref=e29] [cursor=pointer]
+  - generic [ref=e30]:
+    - generic [ref=e31]:
+      - generic [ref=e32]:
+        - heading "Articles" [level=2] [ref=e33]
+        - paragraph [ref=e34]: 共 0 篇，未读 0 篇
+      - button "全部标为已读" [disabled] [ref=e35]
+    - generic [ref=e36]:
+      - button "全部 0" [ref=e37] [cursor=pointer]
+      - button "未读 0" [ref=e38] [cursor=pointer]
+      - button "已读 0" [ref=e39] [cursor=pointer]
+    - textbox "搜索标题、作者..." [ref=e41]
+    - generic [ref=e43]: 暂无文章，请添加订阅源或刷新
+  - article [ref=e44]:
+    - generic [ref=e45]: 请从左侧选择文章

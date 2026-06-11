@@ -2,7 +2,7 @@
 
 > 测试人：C（H2Ozer0）
 > 测试日期：2026-06-11
-> 分支：`fix/h2ozer0-feed-refresh-save-article`
+> 分支：`kht-feed-refresh-save-article`
 > 基于：`origin/main` + A (`fix/wrr-feed-refresh-save-article`) + B (`feature/hs2`)
 
 ---
@@ -76,19 +76,22 @@ B（`feature/hs2`，提交 `7acacce`）对前端做了简化和修复：
 | OPML 批量 | `samples/opml/live-test.opml` | 含 Planet Python / xkcd / Daring Fireball |
 | OPML 批量 | `samples/opml/example.opml` | 含 Hacker News / 阮一峰 / NASA |
 
-### 代码层面测试验证
+### 代码层面测试验证（基于代码审查，非运行时测试）
+
+> **注意**：Playwright 无法驱动 Tauri 原生窗口，以下结论均来自对 Rust/TypeScript 源码的逐行审查。
+> 如需运行时验证，请在本地启动 `pnpm tauri dev` 后按第 4 节手动验收步骤操作。
 
 由于后端 `save_articles` 使用 `INSERT OR IGNORE` + `UNIQUE(feed_id, url)` 去重，以下行为可从代码逻辑确认：
 
-| 测试步骤 | 预期行为 | 代码依据 | 确认 |
-|----------|----------|----------|------|
-| 添加 Feed | 文章正常入库 | `import_feed` → `save_articles` | 通过 |
-| 同一 Feed 连续刷新 3 次 | 文章数不异常增长 | `INSERT OR IGNORE` 忽略重复 `(feed_id, url)` | 通过 |
-| Sync All 连续执行 2 次 | Saved Articles 不被远程同步 | `load_all_sync_targets` 排除 `saved` | 通过 |
-| 标记文章已读后刷新 | 已读状态保持 | `save_articles` 只 INSERT 不 UPDATE `read_status` | 通过 |
-| 收藏/稍后读后刷新 | 状态保持 | `save_articles` 不触碰 `is_favorite`/`read_later` | 通过 |
-| Saved Articles 不显示刷新按钮 | UI 阻止操作 | `isLocalSavedFeed` 检查 | 通过 |
-| 网络失败 | 不生成错误 saved article | `sync_one_feed` 失败时写入 `sync_failures`，不写入 articles | 通过 |
+| 测试步骤 | 预期行为 | 代码依据 | 确认方式 |
+|----------|----------|----------|----------|
+| 添加 Feed | 文章正常入库 | `import_feed` → `save_articles` | 代码审查 |
+| 同一 Feed 连续刷新 3 次 | 文章数不异常增长 | `INSERT OR IGNORE` 忽略重复 `(feed_id, url)` | 代码审查 |
+| Sync All 连续执行 2 次 | Saved Articles 不被远程同步 | `load_all_sync_targets` 排除 `saved` | 代码审查 |
+| 标记文章已读后刷新 | 已读状态保持 | `save_articles` 只 INSERT 不 UPDATE `read_status` | 代码审查 |
+| 收藏/稍后读后刷新 | 状态保持 | `save_articles` 不触碰 `is_favorite`/`read_later` | 代码审查 |
+| Saved Articles 不显示刷新按钮 | UI 阻止操作 | `isLocalSavedFeed` 检查 | 代码审查 |
+| 网络失败 | 不生成错误 saved article | `sync_one_feed` 失败时写入 `sync_failures`，不写入 articles | 代码审查 |
 
 ---
 
