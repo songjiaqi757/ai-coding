@@ -1,7 +1,4 @@
-import type { FormEvent, ReactNode } from "react";
 import type { Article, ReadFilter } from "../types";
-
-type SearchScope = "all" | "feed";
 
 type Props = {
   articles: Article[];
@@ -12,23 +9,14 @@ type Props = {
   isLoading: boolean;
   readFilter: ReadFilter;
   searchQuery: string;
-  searchScope: SearchScope;
-  activeSearchQuery: string;
-  searchMatchLabel: string | null;
   isUpdatingReadStatus: boolean;
   onSelectArticle: (id: string) => void;
   onReadFilterChange: (filter: ReadFilter) => void;
   onSearchQueryChange: (query: string) => void;
-  onSearchScopeChange: (scope: SearchScope) => void;
-  onSearch: (event?: FormEvent<HTMLFormElement>) => void;
-  onClearSearch: () => void;
-  onPreviousSearchMatch: () => void;
-  onNextSearchMatch: () => void;
   onToggleReadStatus: (article: Article) => void;
   onToggleFavorite: (article: Article) => void;
   onToggleReadLater: (article: Article) => void;
   onMarkCurrentFeedRead: () => void;
-  highlightText: (text: string) => ReactNode;
 };
 
 export function ArticleList({
@@ -40,23 +28,14 @@ export function ArticleList({
   isLoading,
   readFilter,
   searchQuery,
-  searchScope,
-  activeSearchQuery,
-  searchMatchLabel,
   isUpdatingReadStatus,
   onSelectArticle,
   onReadFilterChange,
   onSearchQueryChange,
-  onSearchScopeChange,
-  onSearch,
-  onClearSearch,
-  onPreviousSearchMatch,
-  onNextSearchMatch,
   onToggleReadStatus,
   onToggleFavorite,
   onToggleReadLater,
   onMarkCurrentFeedRead,
-  highlightText,
 }: Props) {
   const currentFilterCount =
     readFilter === "all" ? totalCount : readFilter === "unread" ? unreadCount : readCount;
@@ -104,49 +83,13 @@ export function ArticleList({
         ))}
       </div>
 
-      <form className="article-search" onSubmit={(event) => onSearch(event)}>
-        <div className="search-input-shell">
-          <input
-            value={searchQuery}
-            onChange={(event) => {
-              const value = event.target.value;
-              onSearchQueryChange(value);
-              if (!value.trim()) onClearSearch();
-            }}
-            placeholder="搜索文章和批注..."
-          />
-          {searchQuery && (
-            <button
-              className="search-clear-button"
-              type="button"
-              aria-label="Clear search"
-              onClick={onClearSearch}
-            >
-              <span className="search-clear-icon" aria-hidden="true" />
-            </button>
-          )}
-        </div>
-        <select
-          value={searchScope}
-          onChange={(event) => onSearchScopeChange(event.target.value as SearchScope)}
-        >
-          <option value="all">全部文章</option>
-          <option value="feed">当前订阅源</option>
-        </select>
-        <button type="submit">搜索</button>
-      </form>
-
-      {activeSearchQuery && (
-        <div className="search-navigation">
-          <button type="button" disabled={searchMatchLabel === "0 / 0"} onClick={onPreviousSearchMatch}>
-            Previous
-          </button>
-          <span>{searchMatchLabel}</span>
-          <button type="button" disabled={searchMatchLabel === "0 / 0"} onClick={onNextSearchMatch}>
-            Next
-          </button>
-        </div>
-      )}
+      <div className="search-box">
+        <input
+          value={searchQuery}
+          onChange={(event) => onSearchQueryChange(event.target.value)}
+          placeholder="搜索标题、作者..."
+        />
+      </div>
 
       <div className="cards">
         {articles.length === 0 && !isLoading && (
@@ -172,7 +115,7 @@ export function ArticleList({
                 <span className={article.isRead ? "read-state" : "read-state unread"}>
                   {article.isRead ? "已读" : "未读"}
                 </span>
-                <span>{highlightText(article.author ?? "未知作者")}</span>
+                <span>{article.author ?? "未知作者"}</span>
                 <span>
                   {article.publishedAt
                     ? new Date(article.publishedAt).toLocaleDateString("zh-CN")
@@ -195,37 +138,31 @@ export function ArticleList({
               className="article-card-main"
               onClick={() => onSelectArticle(article.id)}
             >
-              <span className="article-card-title">{highlightText(article.title)}</span>
-              <span className="article-card-excerpt">{highlightText(article.excerpt || article.content || "No article preview available.")}</span>
+              <span className="article-card-title">{article.title}</span>
+              <span className="article-card-excerpt">{article.excerpt}</span>
             </button>
-            <div className="article-marking-actions">
+            <div className="article-state-actions">
               <button
-                className={article.isFavorite ? "marking-icon-button favorite active" : "marking-icon-button favorite"}
                 type="button"
-                aria-label={article.isFavorite ? "Remove from favorites" : "Add to favorites"}
-                title={article.isFavorite ? "Remove from favorites" : "Add to favorites"}
+                className={article.isFavorite ? "state-pill active" : "state-pill"}
                 onClick={(event) => {
                   event.stopPropagation();
                   onToggleFavorite(article);
                 }}
+                title={article.isFavorite ? "取消收藏" : "收藏文章"}
               >
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="m12 3.3 2.68 5.43 5.99.87-4.34 4.23 1.03 5.97L12 17l-5.36 2.8 1.03-5.97L3.33 9.6l5.99-.87L12 3.3Z" />
-                </svg>
+                {article.isFavorite ? "已收藏" : "收藏"}
               </button>
               <button
-                className={article.readLater ? "marking-icon-button read-later active" : "marking-icon-button read-later"}
                 type="button"
-                aria-label={article.readLater ? "Remove from read later" : "Add to read later"}
-                title={article.readLater ? "Remove from read later" : "Add to read later"}
+                className={article.readLater ? "state-pill active" : "state-pill"}
                 onClick={(event) => {
                   event.stopPropagation();
                   onToggleReadLater(article);
                 }}
+                title={article.readLater ? "取消稍后读" : "稍后读"}
               >
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M6.75 4.75c0-.97.78-1.75 1.75-1.75h7c.97 0 1.75.78 1.75 1.75v16L12 17.5 6.75 20.75v-16Z" />
-                </svg>
+                {article.readLater ? "稍后读中" : "稍后读"}
               </button>
             </div>
           </article>
