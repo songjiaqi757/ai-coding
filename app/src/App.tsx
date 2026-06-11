@@ -488,13 +488,18 @@ function App() {
           ? articlesPromise
           : invoke<Article[]>("list_articles", { feedId: null, readFilter: "all" });
 
-      const [nextFeeds, nextArticles, allArticles] = await Promise.all([
+      const [nextFeeds, nextArticlesRaw, allArticlesRaw] = await Promise.all([
         invoke<Feed[]>("list_feeds"),
         articlesPromise,
         allArticlesPromise,
       ]);
 
-      setFeeds(nextFeeds);
+      const allArticles = allArticlesRaw.filter((a) => a.feedId !== "saved");
+      const nextArticles = listFeedId === null
+        ? nextArticlesRaw.filter((a) => a.feedId !== "saved")
+        : nextArticlesRaw;
+
+      setFeeds(nextFeeds.filter((f) => f.id !== "saved"));
       setArticles(nextArticles);
       setSearchResults(null);
       setActiveSearchQuery("");
