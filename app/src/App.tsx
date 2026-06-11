@@ -401,6 +401,8 @@ function App() {
   const [searchResults, setSearchResults] = useState<Article[] | null>(null);
   const [allArticleCount, setAllArticleCount] = useState(0);
   const [allUnreadCount, setAllUnreadCount] = useState(0);
+  const [favoriteCount, setFavoriteCount] = useState(0);
+  const [favoriteUnreadCount, setFavoriteUnreadCount] = useState(0);
   const [selectedFeedId, setSelectedFeedId] = useState("all");
   const [selectedArticleId, setSelectedArticleId] = useState<string | null>(null);
   const [readerArticle, setReaderArticle] = useState<Article | null>(null);
@@ -506,12 +508,16 @@ function App() {
       setSearchMatchIndex(0);
       setAllArticleCount(allArticles.length);
       setAllUnreadCount(allArticles.filter((article) => !article.isRead).length);
+      setFavoriteCount(allArticles.filter((article) => article.isFavorite).length);
+      setFavoriteUnreadCount(allArticles.filter((article) => article.isFavorite && !article.isRead).length);
     } catch {
       /* Pure frontend dev — Tauri invoke unavailable, fall back to mock */
       setFeeds(MOCK_FEEDS);
       setArticles(MOCK_ARTICLES);
       setAllArticleCount(MOCK_ARTICLES.length);
       setAllUnreadCount(MOCK_ARTICLES.filter((article) => !article.isRead).length);
+      setFavoriteCount(MOCK_ARTICLES.filter((article) => article.isFavorite).length);
+      setFavoriteUnreadCount(MOCK_ARTICLES.filter((article) => article.isFavorite && !article.isRead).length);
     } finally {
       setIsLoading(false);
     }
@@ -722,19 +728,6 @@ function App() {
         await invoke<Article>("set_article_favorite", {
           articleId: article.id,
           isFavorite: !article.isFavorite,
-        }),
-      );
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function toggleReadLater(article: Article) {
-    try {
-      mergeArticle(
-        await invoke<Article>("set_article_read_later", {
-          articleId: article.id,
-          readLater: !article.readLater,
         }),
       );
     } catch (error) {
@@ -1458,6 +1451,8 @@ function App() {
         feeds={feeds}
         allArticleCount={allArticleCount}
         allUnreadCount={allUnreadCount}
+        favoriteCount={favoriteCount}
+        favoriteUnreadCount={favoriteUnreadCount}
         appLanguage={appLanguage}
         selectedFeedId={selectedFeedId}
         syncStatus={syncStatus}
@@ -1495,7 +1490,6 @@ function App() {
         onNextSearchMatch={() => focusSearchMatch(searchMatchIndex + 1)}
         onToggleReadStatus={handleToggleReadStatus}
         onToggleFavorite={toggleFavorite}
-        onToggleReadLater={toggleReadLater}
         onMarkCurrentFeedRead={handleMarkCurrentFeedRead}
         highlightText={(text) => highlightText(text, activeSearchQuery)}
       />

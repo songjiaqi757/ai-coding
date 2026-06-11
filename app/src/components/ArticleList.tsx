@@ -27,7 +27,6 @@ type Props = {
   onNextSearchMatch: () => void;
   onToggleReadStatus: (article: Article) => void;
   onToggleFavorite: (article: Article) => void;
-  onToggleReadLater: (article: Article) => void;
   onMarkCurrentFeedRead: () => void;
   highlightText: (text: string) => ReactNode;
 };
@@ -56,7 +55,6 @@ export function ArticleList({
   onNextSearchMatch,
   onToggleReadStatus,
   onToggleFavorite,
-  onToggleReadLater,
   onMarkCurrentFeedRead,
   highlightText,
 }: Props) {
@@ -175,32 +173,47 @@ export function ArticleList({
             <div className="article-card-header">
               <span className="article-meta">
                 {!article.isRead && <span className="read-state unread">{isZh ? "未读" : "Unread"}</span>}
-                <span>{highlightText(article.author ?? (isZh ? "未知作者" : "Unknown author"))}</span>
                 <span>
                   {article.publishedAt
                     ? new Date(article.publishedAt).toLocaleDateString("zh-CN")
                     : ""}
                 </span>
-                </span>
-              <button
-                type="button"
-                className="read-toggle"
-                aria-label={article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}
-                title={article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onToggleReadStatus(article);
-                }}
-              >
-                <svg aria-hidden="true" viewBox="0 0 20 20">
-                  {article.isRead ? (
-                    <path d="M6.5 6.5h7v7m0-7-7 7" />
-                  ) : (
-                    <path d="m5 10 3.2 3.2L15 6.5" />
-                  )}
-                </svg>
-                <span>{article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}</span>
-              </button>
+              </span>
+              <div className="article-card-top-actions">
+                <button
+                  className={article.isFavorite ? "marking-icon-button favorite active" : "marking-icon-button favorite"}
+                  type="button"
+                  aria-label={article.isFavorite ? (isZh ? "取消收藏" : "Remove from favorites") : isZh ? "加入收藏" : "Add to favorites"}
+                  title={article.isFavorite ? (isZh ? "取消收藏" : "Remove from favorites") : isZh ? "加入收藏" : "Add to favorites"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleFavorite(article);
+                  }}
+                >
+                  <svg aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="m12 3.3 2.68 5.43 5.99.87-4.34 4.23 1.03 5.97L12 17l-5.36 2.8 1.03-5.97L3.33 9.6l5.99-.87L12 3.3Z" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className="read-toggle"
+                  aria-label={article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}
+                  title={article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleReadStatus(article);
+                  }}
+                >
+                  <svg aria-hidden="true" viewBox="0 0 20 20">
+                    {article.isRead ? (
+                      <path d="M6.5 6.5h7v7m0-7-7 7" />
+                    ) : (
+                      <path d="m5 10 3.2 3.2L15 6.5" />
+                    )}
+                  </svg>
+                  <span>{article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}</span>
+                </button>
+              </div>
             </div>
             <button
               type="button"
@@ -208,38 +221,7 @@ export function ArticleList({
               onClick={() => onSelectArticle(article.id)}
             >
               <span className="article-card-title">{highlightText(article.title)}</span>
-              <span className="article-card-excerpt">{highlightText(article.excerpt || article.content || (isZh ? "暂无文章预览。" : "No article preview available."))}</span>
             </button>
-            <div className="article-marking-actions">
-              <button
-                className={article.isFavorite ? "marking-icon-button favorite active" : "marking-icon-button favorite"}
-                type="button"
-                aria-label={article.isFavorite ? (isZh ? "取消收藏" : "Remove from favorites") : isZh ? "加入收藏" : "Add to favorites"}
-                title={article.isFavorite ? (isZh ? "取消收藏" : "Remove from favorites") : isZh ? "加入收藏" : "Add to favorites"}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onToggleFavorite(article);
-                }}
-              >
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="m12 3.3 2.68 5.43 5.99.87-4.34 4.23 1.03 5.97L12 17l-5.36 2.8 1.03-5.97L3.33 9.6l5.99-.87L12 3.3Z" />
-                </svg>
-              </button>
-              <button
-                className={article.readLater ? "marking-icon-button read-later active" : "marking-icon-button read-later"}
-                type="button"
-                aria-label={article.readLater ? (isZh ? "取消稍后读" : "Remove from read later") : isZh ? "加入稍后读" : "Add to read later"}
-                title={article.readLater ? (isZh ? "取消稍后读" : "Remove from read later") : isZh ? "加入稍后读" : "Add to read later"}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onToggleReadLater(article);
-                }}
-              >
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M6.75 4.75c0-.97.78-1.75 1.75-1.75h7c.97 0 1.75.78 1.75 1.75v16L12 17.5 6.75 20.75v-16Z" />
-                </svg>
-              </button>
-            </div>
           </article>
         ))}
       </div>

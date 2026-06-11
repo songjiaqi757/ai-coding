@@ -409,6 +409,14 @@ button {
   margin-bottom: 2px;
 }
 
+.article-card-top-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .article-card-main {
   display: block;
   width: 100%;
@@ -476,7 +484,7 @@ button {
 
 .article-card-title {
   display: block;
-  margin: 10px 0 8px;
+  margin: 10px 0 4px;
   overflow-wrap: anywhere;
   font-size: 17px;
   line-height: 1.35;
@@ -526,13 +534,6 @@ button {
   background: #eef5ff;
   border-color: #9ebceb;
   box-shadow: 0 0 0 3px rgb(59 130 246 / 10%);
-}
-
-.article-marking-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 12px;
 }
 
 .marking-icon-button {

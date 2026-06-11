@@ -9,6 +9,8 @@ type Props = {
   feeds: Feed[];
   allArticleCount: number;
   allUnreadCount: number;
+  favoriteCount: number;
+  favoriteUnreadCount: number;
   appLanguage: AppLanguage;
   selectedFeedId: string;
   syncStatus: SyncStatus | null;
@@ -21,6 +23,8 @@ export function Sidebar({
   feeds,
   allArticleCount,
   allUnreadCount,
+  favoriteCount,
+  favoriteUnreadCount,
   appLanguage,
   selectedFeedId,
   syncStatus,
@@ -217,6 +221,15 @@ export function Sidebar({
     total: allArticleCount,
     lastSyncAt: null,
   };
+  const favoritesFeed = {
+    id: "favorites",
+    title: isZh ? "收藏" : "Favorites",
+    url: "",
+    siteUrl: null,
+    unread: favoriteUnreadCount,
+    total: favoriteCount,
+    lastSyncAt: null,
+  };
   const failedCount = syncStatus?.failedFeeds.length ?? 0;
   const isRunning = syncStatus?.phase === "running" || isSyncing;
 
@@ -300,7 +313,7 @@ export function Sidebar({
         )}
 
         <div className="feed-list">
-          {[allFeed, ...feeds].map((feed) => (
+          {[allFeed, favoritesFeed, ...feeds].map((feed) => (
             <div
               key={feed.id}
               className={
