@@ -238,16 +238,18 @@ npm run tauri dev
 
 工作流会：
 
-- 在 `macos-latest` 和 `windows-latest` 上分别构建；
+- 在 `macos-latest`、`windows-latest` 和 `ubuntu-22.04` 上分别构建；
 - 执行 `npm ci`；
+- 在 Linux runner 上自动安装 Tauri 打包依赖；
 - 执行 Tauri bundle；
 - 将产物上传到 GitHub Release。
 
 说明：
 
-- 当前工作流面向 **macOS + Windows**；
+- 当前工作流面向 **macOS + Windows + Linux**；
 - macOS 安装包当前为普通构建产物；
-- Windows 安装包如需减少安全提示，后续可补充代码签名。
+- Windows 安装包如需减少安全提示，后续可补充代码签名；
+- Linux 构建会产出对应的桌面安装包/归档产物，具体格式取决于 runner 和 Tauri bundler。
 
 说明：
 

@@ -19,6 +19,8 @@ jobs:
             args: ""
           - platform: windows-latest
             args: ""
+          - platform: ubuntu-22.04
+            args: ""
 
     runs-on: ${{ matrix.platform }}
 
@@ -40,6 +42,21 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -51,7 +68,7 @@ jobs:
           projectPath: app
           tagName: v__VERSION__
           releaseName: "Mercury v__VERSION__"
-          releaseBody: "Internal release build for Mercury. Download the desktop assets for macOS and Windows below."
+          releaseBody: "Internal release build for Mercury. Download the desktop assets for macOS, Windows, and Linux below."
           releaseDraft: false
           prerelease: true
           includeUpdaterJson: false
