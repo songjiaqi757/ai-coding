@@ -2,13 +2,15 @@ import { useEffect, useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Article, Feed, SyncStatus, SyncReport, SyncConfig } from "../types";
 
-const SAVED_ARTICLES_FEED_ID = "saved";
+const LOCAL_ONLY_FEED_IDS = ["all", "favorites", "read-later", "saved"];
 const SAVED_ARTICLES_FEED_URL = "mercury://saved-articles";
 
 type Props = {
   feeds: Feed[];
   allArticleCount: number;
   allUnreadCount: number;
+  favoriteCount: number;
+  readLaterCount: number;
   selectedFeedId: string;
   syncStatus: SyncStatus | null;
   onSelectFeed: (id: string) => void;
@@ -20,6 +22,8 @@ export function Sidebar({
   feeds,
   allArticleCount,
   allUnreadCount,
+  favoriteCount,
+  readLaterCount,
   selectedFeedId,
   syncStatus,
   onSelectFeed,
@@ -99,7 +103,7 @@ export function Sidebar({
   async function handleRefreshFeed(feedId: string, event: MouseEvent) {
     event.stopPropagation();
     const feed = feeds.find((item) => item.id === feedId);
-    if (isLocalSavedFeed(feed)) {
+    if (isLocalOnlyFeed(feed)) {
       setRefreshError("Saved Articles 是本地列表，不会远程刷新。");
       return;
     }
@@ -206,12 +210,33 @@ export function Sidebar({
     total: allArticleCount,
     lastSyncAt: null,
   };
+  const smartFeeds = [
+    {
+      id: "favorites",
+      title: "Favorites",
+      url: "",
+      siteUrl: null,
+      unread: favoriteCount,
+      total: favoriteCount,
+      lastSyncAt: null,
+    },
+    {
+      id: "read-later",
+      title: "Read Later",
+      url: "",
+      siteUrl: null,
+      unread: readLaterCount,
+      total: readLaterCount,
+      lastSyncAt: null,
+    },
+  ];
 
   const failedCount = syncStatus?.failedFeeds.length ?? 0;
   const isRunning = syncStatus?.phase === "running" || isSyncing;
 
-  function isLocalSavedFeed(feed: Pick<Feed, "id" | "url"> | undefined) {
-    return feed?.id === SAVED_ARTICLES_FEED_ID || feed?.url === SAVED_ARTICLES_FEED_URL;
+  function isLocalOnlyFeed(feed: Pick<Feed, "id" | "url"> | undefined) {
+    if (!feed) return false;
+    return LOCAL_ONLY_FEED_IDS.includes(feed.id) || feed.url === SAVED_ARTICLES_FEED_URL;
   }
 
   return (
@@ -289,7 +314,7 @@ export function Sidebar({
         )}
 
         <div className="feed-list">
-          {[allFeed, ...feeds].map((feed) => (
+          {[allFeed, ...smartFeeds, ...feeds].map((feed) => (
             <div
               key={feed.id}
               className={
@@ -310,7 +335,7 @@ export function Sidebar({
                 {feed.title}
               </button>
               <span className="feed-right">
-                {feed.id !== "all" && !isLocalSavedFeed(feed) && (
+                {!isLocalOnlyFeed(feed) && (
                   <button
                     className={
                       refreshingFeedId === feed.id
