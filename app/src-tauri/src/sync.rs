@@ -102,7 +102,7 @@ pub async fn sync_one_feed(app: &AppHandle, feed_id: &str) -> Result<i64, String
         .map_err(|error| format!("Failed to parse feed: {error}"))?;
 
     let conn = open_database(app)?;
-    let saved = save_articles(&conn, feed_id, parsed.entries)? as i64;
+    let saved = save_articles(&conn, feed_id, &target.url, parsed.entries)? as i64;
     conn.execute(
         "UPDATE feeds
          SET last_sync_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP

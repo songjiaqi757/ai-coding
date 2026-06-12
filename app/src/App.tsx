@@ -206,6 +206,26 @@ function isDecorativeMarkdownBlock(block: string) {
   return false;
 }
 
+function looksLikeLiteralHtmlMarkdown(input: string | null | undefined) {
+  const trimmed = input?.trim();
+  if (!trimmed) return false;
+
+  const lowercase = trimmed.toLowerCase();
+  const markers = ["<p>", "</p>", "<ol>", "</ol>", "<ul>", "</ul>", "<li>", "</li>", "<h1", "<h2", "<h3", 'href="'];
+  const markerCount = markers.filter((marker) => lowercase.includes(marker)).length;
+  return markerCount >= 2 || (lowercase.includes("<p>") && lowercase.includes('href="'));
+}
+
+function looksLikeEncodedHtmlContent(input: string | null | undefined) {
+  const trimmed = input?.trim();
+  if (!trimmed) return false;
+
+  const lowercase = trimmed.toLowerCase();
+  const markers = ["&lt;p&gt;", "&lt;/p&gt;", "&lt;ol&gt;", "&lt;/ol&gt;", "&lt;ul&gt;", "&lt;/ul&gt;", "&lt;li&gt;", "&lt;/li&gt;", "&lt;h1", "&lt;h2", "&lt;h3", "href=&quot;", "href=&#34;"];
+  const markerCount = markers.filter((marker) => lowercase.includes(marker)).length;
+  return markerCount >= 2 || (lowercase.includes("&lt;p&gt;") && markerCount >= 1);
+}
+
 function blocksFromMarkdown(markdown: string): ReaderContentBlock[] {
   return markdown
     .split(/\n\s*\n+/)
@@ -236,11 +256,11 @@ function blocksFromMarkdown(markdown: string): ReaderContentBlock[] {
 
 function translationSourceBlocks(article: Article | null, emptyText: string): ReaderContentBlock[] {
   if (!article) return [];
-  if (article.cleanedMarkdown?.trim()) {
+  if (article.cleanedMarkdown?.trim() && !looksLikeLiteralHtmlMarkdown(article.cleanedMarkdown)) {
     const markdownBlocks = blocksFromMarkdown(article.cleanedMarkdown);
     if (markdownBlocks.length > 0) return markdownBlocks;
   }
-  if (article.cleanedHtml?.trim()) {
+  if (article.cleanedHtml?.trim() && !looksLikeEncodedHtmlContent(article.cleanedHtml)) {
     const htmlBlocks = extractReaderContentBlocks(article.cleanedHtml);
     if (htmlBlocks.length > 0) return htmlBlocks;
   }
@@ -788,10 +808,14 @@ function App() {
 
   const selectedArticle = readerPdfUrl || readerOriginalUrl ? null : (readerArticle ?? selectedListArticle);
   const displayTitle = readerPdfTitle ?? readerOriginalTitle ?? selectedArticle?.title ?? "";
+  const hasStaleCleanedContent = !!selectedArticle && (
+    looksLikeEncodedHtmlContent(selectedArticle.cleanedHtml) ||
+    looksLikeLiteralHtmlMarkdown(selectedArticle.cleanedMarkdown)
+  );
 
   const readerHtml = useMemo(() => {
     if (!selectedArticle) return "";
-    const source = selectedArticle.cleanedHtml?.trim()
+    const source = selectedArticle.cleanedHtml?.trim() && !looksLikeEncodedHtmlContent(selectedArticle.cleanedHtml)
       ? selectedArticle.cleanedHtml
       : selectedArticle.content?.trim()
         ? selectedArticle.content
@@ -846,8 +870,9 @@ function App() {
 
   useEffect(() => {
     if (!selectedArticle) return;
-    if (selectedArticle.cleanedHtml?.trim()) return;
-    if (!selectedArticle.content?.trim() && !selectedArticle.excerpt.trim()) return;
+    const hasCleanedHtml = !!selectedArticle.cleanedHtml?.trim();
+    if (hasCleanedHtml && !hasStaleCleanedContent) return;
+    if (!hasStaleCleanedContent && !selectedArticle.content?.trim() && !selectedArticle.excerpt.trim()) return;
 
     let cancelled = false;
     const articleId = selectedArticle.id;
@@ -877,7 +902,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [isZh, selectedArticle]);
+  }, [hasStaleCleanedContent, isZh, selectedArticle]);
 
   useEffect(() => {
     if (!hasActiveTranslation && readView !== "original") {

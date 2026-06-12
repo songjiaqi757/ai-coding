@@ -204,7 +204,7 @@ async fn fetch_and_save_feed(app: &AppHandle, opml_feed: &OpmlFeed) -> Result<Fe
     )
     .map_err(|error| format!("Failed to update feed after OPML sync: {error}"))?;
 
-    save_articles(&conn, &saved_feed.id, parsed.entries)?;
+    save_articles(&conn, &saved_feed.id, &opml_feed.url, parsed.entries)?;
 
     find_existing_feed(app, &opml_feed.url)?
         .ok_or_else(|| "Feed disappeared after OPML import sync".to_string())

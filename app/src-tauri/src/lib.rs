@@ -307,7 +307,7 @@ pub async fn import_feed(app: &AppHandle, url: &str) -> Result<Feed, String> {
     let conn = open_database(app)?;
 
     if let Some(existing_feed) = find_feed_by_url(&conn, &feed_url)? {
-        save_articles(&conn, &existing_feed.id, parsed.entries)?;
+        save_articles(&conn, &existing_feed.id, &feed_url, parsed.entries)?;
         return find_feed_by_url(&conn, &feed_url)?
             .ok_or_else(|| "Feed disappeared after saving articles".to_string());
     }
@@ -320,7 +320,7 @@ pub async fn import_feed(app: &AppHandle, url: &str) -> Result<Feed, String> {
     )
     .map_err(|error| format!("Failed to save feed: {error}"))?;
 
-    save_articles(&conn, &feed_id, parsed.entries)?;
+    save_articles(&conn, &feed_id, &feed_url, parsed.entries)?;
 
     let unread: i64 = conn
         .query_row(
@@ -721,6 +721,7 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool
 pub fn save_articles(
     conn: &Connection,
     feed_id: &str,
+    feed_url: &str,
     entries: Vec<feed_rs::model::Entry>,
 ) -> Result<usize, String> {
     let mut saved = 0;
@@ -729,7 +730,7 @@ pub fn save_articles(
     dedupe_state.cleanup_existing(conn)?;
 
     for entry in entries {
-        let url = match select_article_url(&entry) {
+        let url = match select_article_url(&entry, feed_url) {
             Some(url) => url,
             None => continue,
         };
@@ -1011,6 +1012,14 @@ fn update_existing_article_from_feed(
                  url = ?6,
                  guid = COALESCE(?7, guid),
                  author = ?8,
+                 raw_html = CASE WHEN url <> ?6 THEN NULL ELSE raw_html END,
+                 cleaned_html = CASE WHEN url <> ?6 THEN NULL ELSE cleaned_html END,
+                 cleaned_markdown = CASE WHEN url <> ?6 THEN NULL ELSE cleaned_markdown END,
+                 cleaner_version = CASE WHEN url <> ?6 THEN NULL ELSE cleaner_version END,
+                 content_fetched_at = CASE WHEN url <> ?6 THEN NULL ELSE content_fetched_at END,
+                 content_fetch_status = CASE WHEN url <> ?6 THEN 'pending' ELSE content_fetch_status END,
+                 content_fetch_error = CASE WHEN url <> ?6 THEN NULL ELSE content_fetch_error END,
+                 final_url = CASE WHEN url <> ?6 THEN NULL ELSE final_url END,
                  updated_at = CURRENT_TIMESTAMP
              WHERE id = ?9",
             params![
@@ -1035,6 +1044,14 @@ fn update_existing_article_from_feed(
                  published_at = ?5,
                  excerpt = ?6,
                  content = ?7,
+                 raw_html = CASE WHEN url <> ?2 THEN NULL ELSE raw_html END,
+                 cleaned_html = CASE WHEN url <> ?2 THEN NULL ELSE cleaned_html END,
+                 cleaned_markdown = CASE WHEN url <> ?2 THEN NULL ELSE cleaned_markdown END,
+                 cleaner_version = CASE WHEN url <> ?2 THEN NULL ELSE cleaner_version END,
+                 content_fetched_at = CASE WHEN url <> ?2 THEN NULL ELSE content_fetched_at END,
+                 content_fetch_status = CASE WHEN url <> ?2 THEN 'pending' ELSE content_fetch_status END,
+                 content_fetch_error = CASE WHEN url <> ?2 THEN NULL ELSE content_fetch_error END,
+                 final_url = CASE WHEN url <> ?2 THEN NULL ELSE final_url END,
                  updated_at = CURRENT_TIMESTAMP
              WHERE id = ?8",
             params![title, canonical_url, guid, author, published_at, excerpt, content, article_id],
@@ -1080,7 +1097,23 @@ fn merge_duplicate_article(
     Ok(())
 }
 
-fn select_article_url(entry: &feed_rs::model::Entry) -> Option<String> {
+fn resolve_article_url(candidate: &str, feed_url: &str) -> Option<String> {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(parsed) = reqwest::Url::parse(trimmed) {
+        return Some(parsed.to_string());
+    }
+
+    reqwest::Url::parse(feed_url)
+        .ok()
+        .and_then(|base| base.join(trimmed).ok())
+        .map(|url| url.to_string())
+}
+
+fn select_article_url(entry: &feed_rs::model::Entry, feed_url: &str) -> Option<String> {
     entry
         .links
         .iter()
@@ -1091,11 +1124,10 @@ fn select_article_url(entry: &feed_rs::model::Entry) -> Option<String> {
                 .eq_ignore_ascii_case("alternate")
         })
         .or_else(|| entry.links.first())
-        .map(|link| link.href.trim().to_string())
-        .filter(|url| !url.is_empty())
+        .and_then(|link| resolve_article_url(&link.href, feed_url))
         .or_else(|| {
             let guid = entry.id.trim();
-            reqwest::Url::parse(guid).ok().map(|_| guid.to_string())
+            resolve_article_url(guid, feed_url)
         })
 }
 
@@ -1200,6 +1232,65 @@ fn strip_markdown_syntax(input: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn looks_like_literal_html_markdown(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lowercase = trimmed.to_ascii_lowercase();
+    let markers = [
+        "<p>",
+        "</p>",
+        "<ol>",
+        "</ol>",
+        "<ul>",
+        "</ul>",
+        "<li>",
+        "</li>",
+        "<h1",
+        "<h2",
+        "<h3",
+        "href=\"",
+    ];
+    let marker_count = markers
+        .iter()
+        .filter(|marker| lowercase.contains(**marker))
+        .count();
+
+    marker_count >= 2 || (lowercase.contains("<p>") && lowercase.contains("href=\""))
+}
+
+fn looks_like_encoded_html_content(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lowercase = trimmed.to_ascii_lowercase();
+    let markers = [
+        "&lt;p&gt;",
+        "&lt;/p&gt;",
+        "&lt;ol&gt;",
+        "&lt;/ol&gt;",
+        "&lt;ul&gt;",
+        "&lt;/ul&gt;",
+        "&lt;li&gt;",
+        "&lt;/li&gt;",
+        "&lt;h1",
+        "&lt;h2",
+        "&lt;h3",
+        "href=&quot;",
+        "href=&#34;",
+    ];
+    let marker_count = markers
+        .iter()
+        .filter(|marker| lowercase.contains(**marker))
+        .count();
+
+    marker_count >= 2 || (lowercase.contains("&lt;p&gt;") && marker_count >= 1)
 }
 
 fn is_metadata_line(input: &str) -> bool {
@@ -2200,10 +2291,20 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
         load_article_by_id(&conn, &article_id)?
     };
 
-    if article
+    let has_stale_cleaned_markdown = article
         .cleaned_markdown
         .as_ref()
+        .is_some_and(|value| looks_like_literal_html_markdown(value));
+    let has_stale_cleaned_html = article
+        .cleaned_html
+        .as_ref()
+        .is_some_and(|value| looks_like_encoded_html_content(value));
+    if article
+        .cleaned_html
+        .as_ref()
         .is_some_and(|value| !value.trim().is_empty())
+        && !has_stale_cleaned_html
+        && !has_stale_cleaned_markdown
     {
         return Ok(article);
     }
@@ -2811,4 +2912,190 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{init_schema, save_articles};
+    use rusqlite::{params, Connection};
+
+    fn parse_entries(xml: &str) -> Vec<feed_rs::model::Entry> {
+        feed_rs::parser::parse(xml.as_bytes())
+            .expect("feed should parse")
+            .entries
+    }
+
+    fn setup_connection(feed_id: &str, feed_url: &str) -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite should open");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys should enable");
+        init_schema(&conn).expect("schema should initialize");
+        conn.execute(
+            "INSERT INTO feeds (id, title, url) VALUES (?1, ?2, ?3)",
+            params![feed_id, "Test Feed", feed_url],
+        )
+        .expect("feed should insert");
+        conn
+    }
+
+    #[test]
+    fn save_articles_resolves_relative_entry_links_against_feed_url() {
+        let feed_id = "feed-1";
+        let feed_url = "https://soulhacker.me/index.xml";
+        let conn = setup_connection(feed_id, feed_url);
+        let entries = parse_entries(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <rss version="2.0">
+              <channel>
+                <title>Test Feed</title>
+                <item>
+                  <title>Local Inference</title>
+                  <link>/posts/local-inference/</link>
+                  <guid>/posts/local-inference/</guid>
+                  <description>&lt;p&gt;Summary&lt;/p&gt;</description>
+                </item>
+              </channel>
+            </rss>"#,
+        );
+
+        save_articles(&conn, feed_id, feed_url, entries).expect("articles should save");
+
+        let saved_url: String = conn
+            .query_row("SELECT url FROM articles WHERE feed_id = ?1", params![feed_id], |row| {
+                row.get(0)
+            })
+            .expect("article url should load");
+        assert_eq!(saved_url, "https://soulhacker.me/posts/local-inference");
+    }
+
+    #[test]
+    fn save_articles_keeps_absolute_entry_links_unchanged() {
+        let feed_id = "feed-2";
+        let feed_url = "https://example.com/feed.xml";
+        let conn = setup_connection(feed_id, feed_url);
+        let entries = parse_entries(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <rss version="2.0">
+              <channel>
+                <title>Test Feed</title>
+                <item>
+                  <title>Absolute Link</title>
+                  <link>https://example.com/posts/absolute-link/</link>
+                  <guid>https://example.com/posts/absolute-link/</guid>
+                  <description>Summary</description>
+                </item>
+              </channel>
+            </rss>"#,
+        );
+
+        save_articles(&conn, feed_id, feed_url, entries).expect("articles should save");
+
+        let saved_url: String = conn
+            .query_row("SELECT url FROM articles WHERE feed_id = ?1", params![feed_id], |row| {
+                row.get(0)
+            })
+            .expect("article url should load");
+        assert_eq!(saved_url, "https://example.com/posts/absolute-link");
+    }
+
+    #[test]
+    fn save_articles_clears_stale_cleaned_cache_when_entry_url_changes() {
+        let feed_id = "feed-3";
+        let feed_url = "https://soulhacker.me/index.xml";
+        let conn = setup_connection(feed_id, feed_url);
+        conn.execute(
+            "INSERT INTO articles (
+                id, feed_id, title, url, guid, excerpt, content, cleaned_html,
+                cleaned_markdown, cleaner_version, content_fetched_at, content_fetch_status,
+                content_fetch_error, final_url
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                ?9, ?10, ?11, ?12,
+                ?13, ?14
+             )",
+            params![
+                "article-1",
+                feed_id,
+                "Local Inference",
+                "/posts/local-inference/",
+                "/posts/local-inference/",
+                "<p>Summary</p>",
+                "",
+                "<article>bad</article>",
+                "<p>bad</p>",
+                "old-cleaner",
+                "2026-06-12T00:00:00Z",
+                "cleaned",
+                "old error",
+                "https://soulhacker.me/posts/local-inference/"
+            ],
+        )
+        .expect("stale article should insert");
+
+        let entries = parse_entries(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <rss version="2.0">
+              <channel>
+                <title>Test Feed</title>
+                <item>
+                  <title>Local Inference</title>
+                  <link>/posts/local-inference/</link>
+                  <guid>/posts/local-inference/</guid>
+                  <description>&lt;p&gt;Summary&lt;/p&gt;</description>
+                </item>
+              </channel>
+            </rss>"#,
+        );
+
+        save_articles(&conn, feed_id, feed_url, entries).expect("articles should save");
+
+        let row = conn
+            .query_row(
+                "SELECT url, cleaned_html, cleaned_markdown, cleaner_version, content_fetched_at,
+                        content_fetch_status, content_fetch_error, final_url
+                 FROM articles
+                 WHERE id = ?1",
+                params!["article-1"],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                    ))
+                },
+            )
+            .expect("updated article should load");
+
+        assert_eq!(row.0, "https://soulhacker.me/posts/local-inference");
+        assert_eq!(row.1, None);
+        assert_eq!(row.2, None);
+        assert_eq!(row.3, None);
+        assert_eq!(row.4, None);
+        assert_eq!(row.5, "pending");
+        assert_eq!(row.6, None);
+        assert_eq!(row.7, None);
+    }
+
+    #[test]
+    fn literal_html_markdown_detection_matches_broken_cached_markdown() {
+        let broken = r#"<p>我决定写篇短文</p><ol><li><a href="https://example.com">link</a></li></ol>"#;
+        let normal = "我决定写篇短文\n\n- 第一条\n- 第二条";
+
+        assert!(super::looks_like_literal_html_markdown(broken));
+        assert!(!super::looks_like_literal_html_markdown(normal));
+    }
+
+    #[test]
+    fn encoded_html_detection_matches_broken_cleaned_html() {
+        let broken = r#"<article><p>&lt;p&gt;我决定写篇短文&lt;/p&gt;&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://example.com&quot;&gt;link&lt;/a&gt;&lt;/li&gt;&lt;/ol&gt;</p></article>"#;
+        let normal = r#"<article><p>我决定写篇短文</p><ol><li><a href="https://example.com">link</a></li></ol></article>"#;
+
+        assert!(super::looks_like_encoded_html_content(broken));
+        assert!(!super::looks_like_encoded_html_content(normal));
+    }
 }
