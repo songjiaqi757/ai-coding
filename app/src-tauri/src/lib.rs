@@ -423,15 +423,16 @@ async fn fetch_feed_resource(url: &str) -> Result<FeedFetchResponse, String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
+        .http1_only()
         .user_agent("Mercury/0.1 feed-import")
         .build()
-        .map_err(|error| format!("Failed to create HTTP client: {error}"))?;
+        .map_err(|error| format!("Failed to create feed HTTP client: {}", reqwest_error_details(&error, url)))?;
 
     let response = client
         .get(url)
         .send()
         .await
-        .map_err(|error| format!("Failed to request feed URL: {error}"))?;
+        .map_err(|error| format!("Failed to request feed URL: {}", reqwest_error_details(&error, url)))?;
 
     if !response.status().is_success() {
         return Err(format!("Failed to request feed URL: HTTP {}", response.status()));
@@ -463,6 +464,48 @@ fn decode_http_body(content_type: Option<&str>, bytes: &[u8]) -> String {
     let encoding = Encoding::for_label(charset.as_bytes()).unwrap_or(encoding_rs::UTF_8);
     let (decoded, _, _) = encoding.decode(bytes);
     decoded.into_owned()
+}
+
+fn reqwest_error_details(error: &reqwest::Error, url: &str) -> String {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "unknown"
+    };
+
+    let mut parts = vec![
+        format!("type={category}"),
+        format!("url={url}"),
+        format!("message={error}"),
+    ];
+
+    if let Some(status) = error.status() {
+        parts.push(format!("status={status}"));
+    }
+
+    if let Some(error_url) = error.url() {
+        parts.push(format!("reqwest_url={error_url}"));
+    }
+
+    let mut sources = Vec::new();
+    let mut current = std::error::Error::source(error);
+    while let Some(source) = current {
+        sources.push(source.to_string());
+        current = source.source();
+    }
+    if !sources.is_empty() {
+        parts.push(format!("sources={}", sources.join(" | ")));
+    }
+
+    parts.join("; ")
 }
 
 fn looks_like_html_content(content_type: Option<&str>, body: &str) -> bool {
@@ -1684,13 +1727,15 @@ async fn fetch_html(url: &str) -> Result<String, String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
+        .http1_only()
+        .user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|error| format!("Failed to create HTTP client: {error}"))?;
+        .map_err(|error| format!("Failed to create HTTP client: {}", reqwest_error_details(&error, url)))?;
     let response = client
         .get(url)
         .send()
         .await
-        .map_err(|error| format!("Failed to fetch article HTML: {error}"))?;
+        .map_err(|error| format!("Failed to fetch article HTML: {}", reqwest_error_details(&error, url)))?;
 
     if !response.status().is_success() {
         return Err(format!(
