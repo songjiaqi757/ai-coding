@@ -294,27 +294,21 @@ pub(crate) fn find_feed_by_url(conn: &Connection, url: &str) -> Result<Option<Fe
 }
 
 pub async fn import_feed(app: &AppHandle, url: &str) -> Result<Feed, String> {
-    let response = reqwest::get(url)
-        .await
-        .map_err(|error| format!("Failed to request feed URL: {error}"))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("Failed to read feed response: {error}"))?;
-    let parsed = feed_rs::parser::parse(bytes.as_ref())
-        .map_err(|error| format!("Failed to parse RSS/Atom/JSON Feed: {error}"))?;
+    let resolved = resolve_feed_import(url).await?;
+    let parsed = resolved.feed;
+    let feed_url = resolved.feed_url;
 
     let title = parsed
         .title
         .as_ref()
         .map(|title| title.content.clone())
         .unwrap_or_else(|| "Untitled feed".to_string());
-    let site_url = select_feed_site_url(&parsed, None, url);
+    let site_url = select_feed_site_url(&parsed, None, &feed_url);
     let conn = open_database(app)?;
 
-    if let Some(existing_feed) = find_feed_by_url(&conn, url)? {
+    if let Some(existing_feed) = find_feed_by_url(&conn, &feed_url)? {
         save_articles(&conn, &existing_feed.id, parsed.entries)?;
-        return find_feed_by_url(&conn, url)?
+        return find_feed_by_url(&conn, &feed_url)?
             .ok_or_else(|| "Feed disappeared after saving articles".to_string());
     }
 
@@ -322,7 +316,7 @@ pub async fn import_feed(app: &AppHandle, url: &str) -> Result<Feed, String> {
     conn.execute(
         "INSERT INTO feeds (id, title, url, site_url, last_sync_at)
          VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
-        params![feed_id, title, url, site_url],
+        params![feed_id, title, feed_url, site_url],
     )
     .map_err(|error| format!("Failed to save feed: {error}"))?;
 
@@ -353,12 +347,221 @@ pub async fn import_feed(app: &AppHandle, url: &str) -> Result<Feed, String> {
     Ok(Feed {
         id: feed_id,
         title,
-        url: url.to_string(),
+        url: feed_url,
         site_url,
         unread,
         total,
         last_sync_at,
     })
+}
+
+struct ResolvedFeedImport {
+    feed_url: String,
+    feed: feed_rs::model::Feed,
+}
+
+struct FeedFetchResponse {
+    final_url: String,
+    content_type: Option<String>,
+    bytes: Vec<u8>,
+}
+
+async fn resolve_feed_import(input_url: &str) -> Result<ResolvedFeedImport, String> {
+    let primary = fetch_feed_resource(input_url).await?;
+    if let Ok(feed) = feed_rs::parser::parse(primary.bytes.as_slice()) {
+        return Ok(ResolvedFeedImport {
+            feed_url: primary.final_url,
+            feed,
+        });
+    }
+
+    let primary_parse_error = feed_rs::parser::parse(primary.bytes.as_slice())
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_else(|| "Unknown feed parsing error".to_string());
+    let mut tried_urls = vec![primary.final_url.clone()];
+    let primary_html = decode_http_body(primary.content_type.as_deref(), &primary.bytes);
+
+    let mut candidates = discover_feed_links_from_html(&primary.final_url, &primary_html);
+    candidates.extend(common_feed_candidate_urls(&primary.final_url));
+    candidates.dedup();
+
+    for candidate in candidates {
+        if tried_urls.iter().any(|tried| urls_match(tried, &candidate)) {
+            continue;
+        }
+        tried_urls.push(candidate.clone());
+
+        let fetched = match fetch_feed_resource(&candidate).await {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        if let Ok(feed) = feed_rs::parser::parse(fetched.bytes.as_slice()) {
+            return Ok(ResolvedFeedImport {
+                feed_url: fetched.final_url,
+                feed,
+            });
+        }
+    }
+
+    let tried_summary = tried_urls.join(", ");
+    if looks_like_html_content(primary.content_type.as_deref(), &primary_html) {
+        return Err(format!(
+            "This URL looks like a webpage, not a feed. Mercury tried these feed URLs: {}. Original parse error: {}",
+            tried_summary, primary_parse_error
+        ));
+    }
+
+    Err(format!(
+        "Failed to parse RSS/Atom/JSON Feed. Tried: {}. Parse error: {}",
+        tried_summary, primary_parse_error
+    ))
+}
+
+async fn fetch_feed_resource(url: &str) -> Result<FeedFetchResponse, String> {
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(20))
+        .user_agent("Mercury/0.1 feed-import")
+        .build()
+        .map_err(|error| format!("Failed to create HTTP client: {error}"))?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("Failed to request feed URL: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Failed to request feed URL: HTTP {}", response.status()));
+    }
+
+    let final_url = response.url().to_string();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Failed to read feed response: {error}"))?;
+
+    Ok(FeedFetchResponse {
+        final_url,
+        content_type,
+        bytes: bytes.to_vec(),
+    })
+}
+
+fn decode_http_body(content_type: Option<&str>, bytes: &[u8]) -> String {
+    let charset = content_type
+        .and_then(extract_charset_from_content_type)
+        .or_else(|| extract_charset_from_html(bytes))
+        .unwrap_or_else(|| "utf-8".to_string());
+    let encoding = Encoding::for_label(charset.as_bytes()).unwrap_or(encoding_rs::UTF_8);
+    let (decoded, _, _) = encoding.decode(bytes);
+    decoded.into_owned()
+}
+
+fn looks_like_html_content(content_type: Option<&str>, body: &str) -> bool {
+    let from_header = content_type
+        .map(|value| value.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(false);
+    let body_sample = body[..body.len().min(512)].to_ascii_lowercase();
+    from_header || body_sample.contains("<html") || body_sample.contains("<head") || body_sample.contains("<body")
+}
+
+fn discover_feed_links_from_html(base_url: &str, html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut candidates = Vec::new();
+    let mut search_from = 0usize;
+
+    while let Some(relative_index) = lower[search_from..].find("<link") {
+        let start = search_from + relative_index;
+        let Some(end_relative) = lower[start..].find('>') else {
+            break;
+        };
+        let end = start + end_relative + 1;
+        let tag = &html[start..end];
+        let tag_lower = &lower[start..end];
+
+        let is_feed_link = (tag_lower.contains("application/rss+xml")
+            || tag_lower.contains("application/atom+xml")
+            || tag_lower.contains("application/feed+json")
+            || tag_lower.contains("application/json"))
+            && tag_lower.contains("alternate");
+
+        if is_feed_link {
+            if let Some(href) = extract_html_attr(tag, "href") {
+                if let Ok(base) = Url::parse(base_url) {
+                    if let Ok(resolved) = base.join(href.trim()) {
+                        candidates.push(resolved.to_string());
+                    }
+                }
+            }
+        }
+
+        search_from = end;
+    }
+
+    candidates
+}
+
+fn extract_html_attr<'a>(tag: &'a str, attr_name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let needle = format!("{attr_name}=");
+    let start = lower.find(&needle)? + needle.len();
+    let remainder = &tag[start..];
+    let quote = remainder.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let value = &remainder[1..];
+    let end = value.find(quote)?;
+    Some(&value[..end])
+}
+
+fn common_feed_candidate_urls(base_url: &str) -> Vec<String> {
+    let Ok(parsed) = Url::parse(base_url) else {
+        return Vec::new();
+    };
+
+    let mut roots = Vec::new();
+    roots.push(parsed.clone());
+
+    let mut directory = parsed.clone();
+    let path = directory.path().to_string();
+    if path.ends_with(".html") {
+        let trimmed = path.rsplit_once('/').map(|value| value.0).unwrap_or("");
+        directory.set_path(if trimmed.is_empty() { "/" } else { trimmed });
+        roots.push(directory.clone());
+    }
+
+    if !path.ends_with('/') {
+        let mut section = parsed.clone();
+        section.set_path(&format!("{}/", path));
+        roots.push(section);
+    }
+
+    let suffixes = ["index.xml", "feed.xml", "feed", "rss.xml", "atom.xml"];
+    let mut candidates = Vec::new();
+
+    for mut root in roots {
+        let base_path = root.path().trim_end_matches('/').to_string();
+        for suffix in suffixes {
+            let candidate_path = if base_path.is_empty() || base_path == "/" {
+                format!("/{}", suffix)
+            } else {
+                format!("{}/{}", base_path, suffix)
+            };
+            root.set_path(&candidate_path);
+            candidates.push(root.to_string());
+        }
+    }
+
+    candidates
 }
 
 pub(crate) fn select_feed_site_url(
