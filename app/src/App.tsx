@@ -448,7 +448,7 @@ function App() {
 
   // AI feature states
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsForm, setSettingsForm] = useState({ baseUrl: "", apiKey: "", modelName: "", networkProxy: "" });
+  const [settingsForm, setSettingsForm] = useState({ baseUrl: "", apiKey: "", modelName: "" });
   const [appLanguage, setAppLanguage] = useState<AppLanguage>("zh");
   const [settingsLanguage, setSettingsLanguage] = useState<AppLanguage>("zh");
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -603,18 +603,16 @@ function App() {
 
   const loadSettings = useCallback(async () => {
     try {
-      const [baseUrl, apiKey, modelName, networkProxy, savedLanguage] = await Promise.all([
+      const [baseUrl, apiKey, modelName, savedLanguage] = await Promise.all([
         invoke<string | null>("load_setting", { key: "llm_base_url" }),
         invoke<string | null>("load_setting", { key: "llm_api_key" }),
         invoke<string | null>("load_setting", { key: "llm_model_name" }),
-        invoke<string | null>("load_setting", { key: "network_proxy" }),
         invoke<AppLanguage | null>("load_setting", { key: "app_language" }),
       ]);
       setSettingsForm({
         baseUrl: baseUrl ?? "",
         apiKey: apiKey ?? "",
         modelName: modelName ?? "",
-        networkProxy: networkProxy ?? "",
       });
       setSettingsLanguage(savedLanguage === "en" ? "en" : "zh");
     } catch {
@@ -635,7 +633,6 @@ function App() {
         invoke("save_setting", { key: "llm_base_url", value: settingsForm.baseUrl }),
         invoke("save_setting", { key: "llm_api_key", value: settingsForm.apiKey }),
         invoke("save_setting", { key: "llm_model_name", value: settingsForm.modelName }),
-        invoke("save_setting", { key: "network_proxy", value: settingsForm.networkProxy }),
         invoke("save_setting", { key: "app_language", value: settingsLanguage }),
       ]);
       setAppLanguage(settingsLanguage);
@@ -2017,15 +2014,6 @@ function App() {
                     placeholder="gpt-4o-mini, deepseek-chat, llama3"
                     value={settingsForm.modelName}
                     onChange={(e) => setSettingsForm((f) => ({ ...f, modelName: e.target.value }))}
-                  />
-                </label>
-
-                <label>
-                  {isZh ? "网络代理" : "Network Proxy"}
-                  <input
-                    placeholder={isZh ? "例如 http://127.0.0.1:7890" : "For example: http://127.0.0.1:7890"}
-                    value={settingsForm.networkProxy}
-                    onChange={(e) => setSettingsForm((f) => ({ ...f, networkProxy: e.target.value }))}
                   />
                 </label>
               </section>

@@ -4,7 +4,7 @@ pub mod sync;
 
 use encoding_rs::Encoding;
 use llm_provider::LlmConfig;
-use reqwest::{header::CONTENT_TYPE, Client, Proxy, Url};
+use reqwest::{header::CONTENT_TYPE, Client, Url};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -294,7 +294,7 @@ pub(crate) fn find_feed_by_url(conn: &Connection, url: &str) -> Result<Option<Fe
 }
 
 pub async fn import_feed(app: &AppHandle, url: &str) -> Result<Feed, String> {
-    let resolved = resolve_feed_import(app, url).await?;
+    let resolved = resolve_feed_import(url).await?;
     let parsed = resolved.feed;
     let feed_url = resolved.feed_url;
 
@@ -366,8 +366,8 @@ struct FeedFetchResponse {
     bytes: Vec<u8>,
 }
 
-async fn resolve_feed_import(app: &AppHandle, input_url: &str) -> Result<ResolvedFeedImport, String> {
-    let primary = fetch_feed_resource(app, input_url).await?;
+async fn resolve_feed_import(input_url: &str) -> Result<ResolvedFeedImport, String> {
+    let primary = fetch_feed_resource(input_url).await?;
     if let Ok(feed) = feed_rs::parser::parse(primary.bytes.as_slice()) {
         return Ok(ResolvedFeedImport {
             feed_url: primary.final_url,
@@ -392,7 +392,7 @@ async fn resolve_feed_import(app: &AppHandle, input_url: &str) -> Result<Resolve
         }
         tried_urls.push(candidate.clone());
 
-        let fetched = match fetch_feed_resource(app, &candidate).await {
+        let fetched = match fetch_feed_resource(&candidate).await {
             Ok(value) => value,
             Err(_) => continue,
         };
@@ -419,15 +419,14 @@ async fn resolve_feed_import(app: &AppHandle, input_url: &str) -> Result<Resolve
     ))
 }
 
-async fn fetch_feed_resource(app: &AppHandle, url: &str) -> Result<FeedFetchResponse, String> {
-    let client = build_app_http_client(
-        app,
-        "Mercury/0.1 feed-import",
-        Duration::from_secs(8),
-        Duration::from_secs(20),
-        url,
-        "feed",
-    )?;
+async fn fetch_feed_resource(url: &str) -> Result<FeedFetchResponse, String> {
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(20))
+        .http1_only()
+        .user_agent("Mercury/0.1 feed-import")
+        .build()
+        .map_err(|error| format!("Failed to create feed HTTP client: {}", reqwest_error_details(&error, url)))?;
 
     let response = client
         .get(url)
@@ -507,50 +506,6 @@ fn reqwest_error_details(error: &reqwest::Error, url: &str) -> String {
     }
 
     parts.join("; ")
-}
-
-fn load_optional_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| row.get(0))
-        .optional()
-        .map_err(|error| format!("Failed to load setting '{key}': {error}"))
-}
-
-fn load_network_proxy(app: &AppHandle) -> Result<Option<String>, String> {
-    let conn = open_database(app)?;
-    load_optional_setting(&conn, "network_proxy").map(|value| {
-        value.and_then(|inner| {
-            let trimmed = inner.trim().to_string();
-            (!trimmed.is_empty()).then_some(trimmed)
-        })
-    })
-}
-
-fn build_app_http_client(
-    app: &AppHandle,
-    user_agent: &str,
-    connect_timeout: Duration,
-    timeout: Duration,
-    url: &str,
-    label: &str,
-) -> Result<Client, String> {
-    let mut builder = Client::builder()
-        .connect_timeout(connect_timeout)
-        .timeout(timeout)
-        .http1_only()
-        .user_agent(user_agent);
-
-    if let Some(proxy_url) = load_network_proxy(app)? {
-        let proxy = Proxy::all(&proxy_url)
-            .map_err(|error| format!("Failed to configure {label} proxy '{proxy_url}': {error}"))?;
-        builder = builder.proxy(proxy);
-    }
-
-    builder.build().map_err(|error| {
-        format!(
-            "Failed to create {label} HTTP client: {}",
-            reqwest_error_details(&error, url)
-        )
-    })
 }
 
 fn looks_like_html_content(content_type: Option<&str>, body: &str) -> bool {
@@ -1768,15 +1723,14 @@ async fn run_node_cleaner(
     .map_err(|error| format!("Node cleaner task failed: {error}"))?
 }
 
-async fn fetch_html(app: &AppHandle, url: &str) -> Result<String, String> {
-    let client = build_app_http_client(
-        app,
-        concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")),
-        Duration::from_secs(8),
-        Duration::from_secs(20),
-        url,
-        "article",
-    )?;
+async fn fetch_html(url: &str) -> Result<String, String> {
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(20))
+        .http1_only()
+        .user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("Failed to create HTTP client: {}", reqwest_error_details(&error, url)))?;
     let response = client
         .get(url)
         .send()
@@ -2259,7 +2213,7 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
     {
         (raw_html.clone(), None, article.final_url.clone())
     } else if safe_fetchable_url(&article.url) {
-        match fetch_html(&app, &article.url).await {
+        match fetch_html(&article.url).await {
             Ok(fetched_html) => (fetched_html.clone(), Some(fetched_html), Some(article.url.clone())),
             Err(_) => {
                 let fallback_html = fallback_html_from_article(&article);
@@ -2294,7 +2248,7 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
 #[tauri::command]
 async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article, String> {
     let normalized_url = normalize_fetch_url(&url)?;
-    let raw_html = fetch_html(&app, &normalized_url).await?;
+    let raw_html = fetch_html(&normalized_url).await?;
     let cleaned = run_node_cleaner(
         &app,
         raw_html.clone(),
@@ -2447,9 +2401,9 @@ async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article,
 }
 
 #[tauri::command]
-async fn fetch_article_html(app: AppHandle, url: String) -> Result<String, String> {
+async fn fetch_article_html(url: String) -> Result<String, String> {
     let normalized_url = normalize_fetch_url(&url)?;
-    let raw_html = fetch_html(&app, &normalized_url).await?;
+    let raw_html = fetch_html(&normalized_url).await?;
     Ok(build_reader_document(&raw_html, &normalized_url))
 }
 
