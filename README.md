@@ -279,15 +279,18 @@ https://v2.tauri.app/blog/tauri-2-0-0-release-candidate/
 
 4. **配置 LLM Provider**：
 
-应用启动后，点击左侧边栏底部的 **Settings** 按钮，填入：
+应用启动后，点击左侧边栏底部的 **Settings** 按钮，分别填入摘要服务和翻译服务配置：
 
 | 配置项 | 说明 | 示例 |
 |--------|------|------|
-| API Base URL | LLM 服务地址 | `https://api.openai.com` 或 `http://localhost:11434`（Ollama） |
-| API Key | API 密钥 | `sk-...`（Ollama 留空） |
-| Model Name | 模型名称 | `gpt-3.5-turbo`、`deepseek-chat`、`llama3` |
+| Summary API Base URL | 摘要模型服务地址 | `https://api.openai.com` 或 `http://localhost:11434`（Ollama） |
+| Summary API Key | 摘要模型 API 密钥 | `sk-...`（Ollama 留空） |
+| Summary Model | 摘要模型名称 | `gpt-4o-mini`、`deepseek-chat`、`llama3` |
+| Translation API Base URL | 翻译模型服务地址 | `https://api.openai.com` 或 `http://localhost:11434`（Ollama） |
+| Translation API Key | 翻译模型 API 密钥 | `sk-...`（Ollama 留空） |
+| Translation Model | 翻译模型名称 | `gpt-4o-mini`、`deepseek-chat`、`llama3` |
 
-配置保存后即可使用 Summary 和 Translate 功能。
+配置保存后即可使用 Summary 和 Translate 功能；两者可以指向不同服务商、不同 API Key 和不同模型。
 
 ### 构建生产版本
 

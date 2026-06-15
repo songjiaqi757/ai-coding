@@ -48,6 +48,16 @@ export type SyncReport = {
   finishedAt: string;
 };
 
+export type AiJobStatus = {
+  id: string;
+  kind: "summary" | "translation";
+  articleId: string;
+  targetLang: string;
+  status: "running" | "completed" | "failed";
+  result: string | null;
+  error: string | null;
+};
+
 export type FeedUnread = {
   feedId: string;
   feedTitle: string;

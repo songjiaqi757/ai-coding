@@ -13,7 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import MarkdownIt from "markdown-it";
 import { Sidebar } from "./components/Sidebar";
 import { ArticleList } from "./components/ArticleList";
-import type { Feed, Article, ReadFilter, UnreadSummary, SyncStatus, Annotation, AppLanguage } from "./types";
+import type { Feed, Article, ReadFilter, UnreadSummary, SyncStatus, Annotation, AppLanguage, AiJobStatus } from "./types";
 import "./App.css";
 
 /* ── Mock data (pure frontend dev — Tauri invoke unavailable) ── */
@@ -468,12 +468,21 @@ function App() {
 
   // AI feature states
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsForm, setSettingsForm] = useState({ baseUrl: "", apiKey: "", modelName: "" });
+  const [settingsForm, setSettingsForm] = useState({
+    summaryBaseUrl: "",
+    summaryApiKey: "",
+    summaryModelName: "",
+    translationBaseUrl: "",
+    translationApiKey: "",
+    translationModelName: "",
+  });
   const [appLanguage, setAppLanguage] = useState<AppLanguage>("zh");
   const [settingsLanguage, setSettingsLanguage] = useState<AppLanguage>("zh");
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
+  const [summaryJob, setSummaryJob] = useState<AiJobStatus | null>(null);
+  const [translationJob, setTranslationJob] = useState<AiJobStatus | null>(null);
   const [selectionOverlay, setSelectionOverlay] = useState<SelectionOverlay | null>(null);
   const [selectionTranslation, setSelectionTranslation] = useState<string | null>(null);
   const [isTranslatingSelection, setIsTranslatingSelection] = useState(false);
@@ -623,16 +632,36 @@ function App() {
 
   const loadSettings = useCallback(async () => {
     try {
-      const [baseUrl, apiKey, modelName, savedLanguage] = await Promise.all([
+      const [
+        legacyBaseUrl,
+        legacyApiKey,
+        legacyModelName,
+        summaryBaseUrl,
+        summaryApiKey,
+        summaryModelName,
+        translationBaseUrl,
+        translationApiKey,
+        translationModelName,
+        savedLanguage,
+      ] = await Promise.all([
         invoke<string | null>("load_setting", { key: "llm_base_url" }),
         invoke<string | null>("load_setting", { key: "llm_api_key" }),
         invoke<string | null>("load_setting", { key: "llm_model_name" }),
+        invoke<string | null>("load_setting", { key: "llm_summary_base_url" }),
+        invoke<string | null>("load_setting", { key: "llm_summary_api_key" }),
+        invoke<string | null>("load_setting", { key: "llm_summary_model_name" }),
+        invoke<string | null>("load_setting", { key: "llm_translation_base_url" }),
+        invoke<string | null>("load_setting", { key: "llm_translation_api_key" }),
+        invoke<string | null>("load_setting", { key: "llm_translation_model_name" }),
         invoke<AppLanguage | null>("load_setting", { key: "app_language" }),
       ]);
       setSettingsForm({
-        baseUrl: baseUrl ?? "",
-        apiKey: apiKey ?? "",
-        modelName: modelName ?? "",
+        summaryBaseUrl: summaryBaseUrl ?? legacyBaseUrl ?? "",
+        summaryApiKey: summaryApiKey ?? legacyApiKey ?? "",
+        summaryModelName: summaryModelName ?? legacyModelName ?? "",
+        translationBaseUrl: translationBaseUrl ?? legacyBaseUrl ?? "",
+        translationApiKey: translationApiKey ?? legacyApiKey ?? "",
+        translationModelName: translationModelName ?? legacyModelName ?? "",
       });
       setSettingsLanguage(savedLanguage === "en" ? "en" : "zh");
     } catch {
@@ -650,9 +679,15 @@ function App() {
     try {
       setIsSavingSettings(true);
       await Promise.all([
-        invoke("save_setting", { key: "llm_base_url", value: settingsForm.baseUrl }),
-        invoke("save_setting", { key: "llm_api_key", value: settingsForm.apiKey }),
-        invoke("save_setting", { key: "llm_model_name", value: settingsForm.modelName }),
+        invoke("save_setting", { key: "llm_base_url", value: settingsForm.summaryBaseUrl }),
+        invoke("save_setting", { key: "llm_api_key", value: settingsForm.summaryApiKey }),
+        invoke("save_setting", { key: "llm_model_name", value: settingsForm.summaryModelName }),
+        invoke("save_setting", { key: "llm_summary_base_url", value: settingsForm.summaryBaseUrl }),
+        invoke("save_setting", { key: "llm_summary_api_key", value: settingsForm.summaryApiKey }),
+        invoke("save_setting", { key: "llm_summary_model_name", value: settingsForm.summaryModelName }),
+        invoke("save_setting", { key: "llm_translation_base_url", value: settingsForm.translationBaseUrl }),
+        invoke("save_setting", { key: "llm_translation_api_key", value: settingsForm.translationApiKey }),
+        invoke("save_setting", { key: "llm_translation_model_name", value: settingsForm.translationModelName }),
         invoke("save_setting", { key: "app_language", value: settingsLanguage }),
       ]);
       setAppLanguage(settingsLanguage);
@@ -664,32 +699,50 @@ function App() {
     }
   }
 
+  function applySummaryResult(articleId: string, lang: string, summary: string) {
+      setSummaryCache((prev) => ({
+        ...prev,
+        [articleId]: {
+          ...(prev[articleId] ?? {}),
+          [lang]: summary,
+        },
+      }));
+      setArticles((prev) =>
+        prev.map((a) => (a.id === articleId ? { ...a, summary, summaryLang: lang } : a)),
+      );
+      setReaderArticle((prev) => (prev?.id === articleId ? { ...prev, summary, summaryLang: lang } : prev));
+  }
+
+  function applyTranslationResult(articleId: string, lang: string, translation: string) {
+      setArticles((prev) =>
+        prev.map((a) => (a.id === articleId ? { ...a, translation, translationLang: lang } : a)),
+      );
+      setReaderArticle((prev) => (prev?.id === articleId ? { ...prev, translation, translationLang: lang } : prev));
+      if (selectedArticle?.id === articleId) {
+        setReadView("translation");
+      }
+  }
+
   async function handleSummarize(force = false, lang = summaryLang) {
     if (!selectedArticle) return;
     try {
       setIsSummarizing(true);
       setAiError(null);
-      const summary = await invoke<string>("summarize_article", {
+      const job = await invoke<AiJobStatus>("start_summary_job", {
         articleId: selectedArticle.id,
         targetLang: lang,
         force,
       });
-      setSummaryCache((prev) => ({
-        ...prev,
-        [selectedArticle.id]: {
-          ...(prev[selectedArticle.id] ?? {}),
-          [lang]: summary,
-        },
-      }));
-      setArticles((prev) =>
-        prev.map((a) => (a.id === selectedArticle.id ? { ...a, summary, summaryLang: lang } : a)),
-      );
-      if (readerArticle?.id === selectedArticle.id) {
-        setReaderArticle({ ...selectedArticle, summary, summaryLang: lang });
+      setSummaryJob(job);
+      if (job.status === "completed" && job.result) {
+        applySummaryResult(job.articleId, job.targetLang, job.result);
+        setIsSummarizing(false);
+      } else if (job.status === "failed") {
+        setAiError(job.error ?? "Summary generation failed");
+        setIsSummarizing(false);
       }
     } catch (error) {
       setAiError(error instanceof Error ? error.message : String(error));
-    } finally {
       setIsSummarizing(false);
     }
   }
@@ -699,23 +752,87 @@ function App() {
     try {
       setIsTranslating(true);
       setAiError(null);
-      const translation = await invoke<string>("translate_article", {
+      const job = await invoke<AiJobStatus>("start_translation_job", {
         articleId: selectedArticle.id,
         targetLang,
       });
-      setArticles((prev) =>
-        prev.map((a) => (a.id === selectedArticle.id ? { ...a, translation, translationLang: targetLang } : a)),
-      );
-      if (readerArticle?.id === selectedArticle.id) {
-        setReaderArticle({ ...selectedArticle, translation, translationLang: targetLang });
+      setTranslationJob(job);
+      if (job.status === "completed" && job.result) {
+        applyTranslationResult(job.articleId, job.targetLang, job.result);
+        setIsTranslating(false);
+      } else if (job.status === "failed") {
+        setAiError(job.error ?? "Translation failed");
+        setIsTranslating(false);
       }
-      setReadView("translation");
     } catch (error) {
       setAiError(error instanceof Error ? error.message : String(error));
-    } finally {
       setIsTranslating(false);
     }
   }
+
+  useEffect(() => {
+    if (!summaryJob || summaryJob.status !== "running") return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const next = await invoke<AiJobStatus>("get_ai_job_status", { jobId: summaryJob.id });
+        if (cancelled) return;
+        setSummaryJob(next);
+        if (next.status === "completed") {
+          if (next.result) {
+            applySummaryResult(next.articleId, next.targetLang, next.result);
+          }
+          setIsSummarizing(false);
+        } else if (next.status === "failed") {
+          setAiError(next.error ?? "Summary generation failed");
+          setIsSummarizing(false);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAiError(error instanceof Error ? error.message : String(error));
+          setIsSummarizing(false);
+        }
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 1200);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [summaryJob?.id, summaryJob?.status]);
+
+  useEffect(() => {
+    if (!translationJob || translationJob.status !== "running") return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const next = await invoke<AiJobStatus>("get_ai_job_status", { jobId: translationJob.id });
+        if (cancelled) return;
+        setTranslationJob(next);
+        if (next.status === "completed") {
+          if (next.result) {
+            applyTranslationResult(next.articleId, next.targetLang, next.result);
+          }
+          setIsTranslating(false);
+        } else if (next.status === "failed") {
+          setAiError(next.error ?? "Translation failed");
+          setIsTranslating(false);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAiError(error instanceof Error ? error.message : String(error));
+          setIsTranslating(false);
+        }
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 1200);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [translationJob?.id, translationJob?.status]);
 
   function mergeArticle(updated: Article) {
     setArticles((prev) => prev.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
@@ -849,6 +966,18 @@ function App() {
     : null;
   const hasActiveSummary = !!activeSummary;
   const hasActiveTranslation = !!selectedArticle?.translation && selectedArticle.translationLang === targetLang;
+  const isCurrentSummaryRunning =
+    !!selectedArticle &&
+    isSummarizing &&
+    summaryJob?.status === "running" &&
+    summaryJob.articleId === selectedArticle.id &&
+    summaryJob.targetLang === summaryLang;
+  const isCurrentTranslationRunning =
+    !!selectedArticle &&
+    isTranslating &&
+    translationJob?.status === "running" &&
+    translationJob.articleId === selectedArticle.id &&
+    translationJob.targetLang === targetLang;
   const displayedBodyLang =
     readView === "translation" && hasActiveTranslation
       ? targetLang
@@ -1677,7 +1806,7 @@ function App() {
                       <path d="M5 12.5h6.5" />
                       <path d="M13 13.5h2.5" />
                     </svg>
-                    <span>{isZh ? "摘要" : "Summary"}</span>
+                    <span>{isSummarizing ? (isZh ? "生成中..." : "Generating...") : isZh ? "摘要" : "Summary"}</span>
                   </button>
                   <button
                     type="button"
@@ -1695,7 +1824,7 @@ function App() {
                       <path d="m13.7 5.5-1.7 8" />
                       <path d="m11.8 11.8 1.9-2 1.9 2" />
                     </svg>
-                    <span>{isZh ? "翻译" : "Translate"}</span>
+                    <span>{isTranslating ? (isZh ? "翻译中..." : "Translating...") : isZh ? "翻译" : "Translate"}</span>
                   </button>
                   <button
                     type="button"
@@ -1729,7 +1858,7 @@ function App() {
 
             {aiError && <div className="error-box">{aiError}</div>}
 
-            {(hasActiveSummary || isSummarizing) && selectedArticle && (
+            {(hasActiveSummary || isCurrentSummaryRunning) && selectedArticle && (
               <div className="ai-result-section">
                 <div className="ai-result-header">
                   <div className="ai-result-label">{isZh ? "摘要" : "Summary"}</div>
@@ -1757,7 +1886,7 @@ function App() {
                 <div className="ai-result-content">
                   {hasActiveSummary
                     ? activeSummary
-                    : isSummarizing
+                    : isCurrentSummaryRunning
                       ? (isZh ? "正在生成该语言的摘要..." : "Generating summary in this language...")
                       : (isZh ? "当前语言还没有摘要。" : "No summary yet in this language.")}
                 </div>
@@ -1784,7 +1913,9 @@ function App() {
                     {isZh ? "对照翻译" : "Translation"}
                   </button>
                 </div>
-                {!hasActiveTranslation && (
+                {isCurrentTranslationRunning ? (
+                  <div className="view-tabs-hint">{isZh ? "正在翻译当前文章，完成后可切换对照视图。" : "Translating this article. The paired view will be available when it finishes."}</div>
+                ) : !hasActiveTranslation && (
                   <div className="view-tabs-hint">{isZh ? "请先点击“翻译”生成当前所选语言的译文后再切换对照视图。" : "Generate a translation first, then switch to the paired translation view."}</div>
                 )}
               </div>
@@ -2011,15 +2142,15 @@ function App() {
               </section>
               <section className="settings-section">
                 <div className="settings-section-heading">
-                  <strong>{isZh ? "AI 服务" : "AI Provider"}</strong>
-                  <span>{isZh ? "用于摘要、全文翻译和选中文本翻译。" : "Used by summary, full-article translation, and selection translation."}</span>
+                  <strong>{isZh ? "摘要 AI 服务" : "Summary AI Provider"}</strong>
+                  <span>{isZh ? "生成摘要时使用这一套 API 地址、密钥和模型。" : "Used only when generating article summaries."}</span>
                 </div>
                 <label>
                   API Base URL
                   <input
                     placeholder={isZh ? "https://api.openai.com 或 http://localhost:11434" : "https://api.openai.com or http://localhost:11434"}
-                    value={settingsForm.baseUrl}
-                    onChange={(e) => setSettingsForm((f) => ({ ...f, baseUrl: e.target.value }))}
+                    value={settingsForm.summaryBaseUrl}
+                    onChange={(e) => setSettingsForm((f) => ({ ...f, summaryBaseUrl: e.target.value }))}
                   />
                 </label>
 
@@ -2028,17 +2159,51 @@ function App() {
                   <input
                     type="password"
                     placeholder={isZh ? "sk-...（使用 Ollama 可留空）" : "sk-... (leave empty for Ollama)"}
-                    value={settingsForm.apiKey}
-                    onChange={(e) => setSettingsForm((f) => ({ ...f, apiKey: e.target.value }))}
+                    value={settingsForm.summaryApiKey}
+                    onChange={(e) => setSettingsForm((f) => ({ ...f, summaryApiKey: e.target.value }))}
                   />
                 </label>
 
                 <label>
-                  Model Name
+                  {isZh ? "摘要模型" : "Summary Model"}
                   <input
                     placeholder="gpt-4o-mini, deepseek-chat, llama3"
-                    value={settingsForm.modelName}
-                    onChange={(e) => setSettingsForm((f) => ({ ...f, modelName: e.target.value }))}
+                    value={settingsForm.summaryModelName}
+                    onChange={(e) => setSettingsForm((f) => ({ ...f, summaryModelName: e.target.value }))}
+                  />
+                </label>
+              </section>
+
+              <section className="settings-section">
+                <div className="settings-section-heading">
+                  <strong>{isZh ? "翻译 AI 服务" : "Translation AI Provider"}</strong>
+                  <span>{isZh ? "全文翻译和选中文本翻译使用这一套 API 地址、密钥和模型。" : "Used for full-article and selected-text translation."}</span>
+                </div>
+                <label>
+                  API Base URL
+                  <input
+                    placeholder={isZh ? "https://api.openai.com 或 http://localhost:11434" : "https://api.openai.com or http://localhost:11434"}
+                    value={settingsForm.translationBaseUrl}
+                    onChange={(e) => setSettingsForm((f) => ({ ...f, translationBaseUrl: e.target.value }))}
+                  />
+                </label>
+
+                <label>
+                  API Key
+                  <input
+                    type="password"
+                    placeholder={isZh ? "sk-...（使用 Ollama 可留空）" : "sk-... (leave empty for Ollama)"}
+                    value={settingsForm.translationApiKey}
+                    onChange={(e) => setSettingsForm((f) => ({ ...f, translationApiKey: e.target.value }))}
+                  />
+                </label>
+
+                <label>
+                  {isZh ? "翻译模型" : "Translation Model"}
+                  <input
+                    placeholder="gpt-4o-mini, deepseek-chat, llama3"
+                    value={settingsForm.translationModelName}
+                    onChange={(e) => setSettingsForm((f) => ({ ...f, translationModelName: e.target.value }))}
                   />
                 </label>
               </section>

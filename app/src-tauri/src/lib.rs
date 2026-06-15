@@ -12,6 +12,8 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
@@ -94,6 +96,23 @@ struct Annotation {
     updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiJobStatus {
+    id: String,
+    kind: String,
+    article_id: String,
+    target_lang: String,
+    status: String,
+    result: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct AiJobState {
+    jobs: Arc<Mutex<HashMap<String, AiJobStatus>>>,
+}
+
 #[derive(Debug, Serialize)]
 struct NodeCleanerInput {
     html: String,
@@ -139,6 +158,16 @@ pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
     // Seed non-sensitive defaults once, without overwriting the user's local settings.
     seed_setting_if_missing(&conn, "llm_base_url", "https://chat.ecnu.edu.cn/open/api")?;
     seed_setting_if_missing(&conn, "llm_model_name", "ecnu-plus")?;
+    let default_base_url = load_setting_value(&conn, "llm_base_url")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://chat.ecnu.edu.cn/open/api".to_string());
+    let default_model = load_setting_value(&conn, "llm_model_name")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "ecnu-plus".to_string());
+    seed_setting_if_missing(&conn, "llm_summary_base_url", &default_base_url)?;
+    seed_setting_if_missing(&conn, "llm_summary_model_name", &default_model)?;
+    seed_setting_if_missing(&conn, "llm_translation_base_url", &default_base_url)?;
+    seed_setting_if_missing(&conn, "llm_translation_model_name", &default_model)?;
 
     Ok(conn)
 }
@@ -426,16 +455,25 @@ async fn fetch_feed_resource(url: &str) -> Result<FeedFetchResponse, String> {
         .http1_only()
         .user_agent("Mercury/0.1 feed-import")
         .build()
-        .map_err(|error| format!("Failed to create feed HTTP client: {}", reqwest_error_details(&error, url)))?;
+        .map_err(|error| {
+            format!(
+                "Failed to create feed HTTP client: {}",
+                reqwest_error_details(&error, url)
+            )
+        })?;
 
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| format!("Failed to request feed URL: {}", reqwest_error_details(&error, url)))?;
+    let response = client.get(url).send().await.map_err(|error| {
+        format!(
+            "Failed to request feed URL: {}",
+            reqwest_error_details(&error, url)
+        )
+    })?;
 
     if !response.status().is_success() {
-        return Err(format!("Failed to request feed URL: HTTP {}", response.status()));
+        return Err(format!(
+            "Failed to request feed URL: HTTP {}",
+            response.status()
+        ));
     }
 
     let final_url = response.url().to_string();
@@ -513,7 +551,10 @@ fn looks_like_html_content(content_type: Option<&str>, body: &str) -> bool {
         .map(|value| value.to_ascii_lowercase().contains("text/html"))
         .unwrap_or(false);
     let body_sample = body[..body.len().min(512)].to_ascii_lowercase();
-    from_header || body_sample.contains("<html") || body_sample.contains("<head") || body_sample.contains("<body")
+    from_header
+        || body_sample.contains("<html")
+        || body_sample.contains("<head")
+        || body_sample.contains("<body")
 }
 
 fn discover_feed_links_from_html(base_url: &str, html: &str) -> Vec<String> {
@@ -755,12 +796,17 @@ pub fn save_articles(
                     .map(|body| body.chars().take(200).collect())
             })
             .unwrap_or_default();
-        let content = entry.content.and_then(|content| content.body).unwrap_or_default();
+        let content = entry
+            .content
+            .and_then(|content| content.body)
+            .unwrap_or_default();
         let title_published_key = article_title_published_key(&title, published_at.as_deref());
 
-        if let Some(existing_id) =
-            dedupe_state.find_existing(guid.as_deref(), &canonical_url, title_published_key.as_deref())
-        {
+        if let Some(existing_id) = dedupe_state.find_existing(
+            guid.as_deref(),
+            &canonical_url,
+            title_published_key.as_deref(),
+        ) {
             update_existing_article_from_feed(
                 conn,
                 has_legacy_source_column,
@@ -893,13 +939,18 @@ impl ArticleDedupeState {
         for record in self.records.clone() {
             let guid_key = record.guid.as_deref().and_then(normalize_entry_guid);
             let url_key = canonicalize_article_url(&record.url);
-            let title_key = article_title_published_key(&record.title, record.published_at.as_deref());
+            let title_key =
+                article_title_published_key(&record.title, record.published_at.as_deref());
 
             let keeper_id = guid_key
                 .as_ref()
                 .and_then(|key| self.by_guid.get(key).cloned())
                 .or_else(|| self.by_url.get(&url_key).cloned())
-                .or_else(|| title_key.as_ref().and_then(|key| self.by_title_published.get(key).cloned()));
+                .or_else(|| {
+                    title_key
+                        .as_ref()
+                        .and_then(|key| self.by_title_published.get(key).cloned())
+                });
 
             if let Some(keeper_id) = keeper_id {
                 if let Some(keeper) = keepers.get_mut(&keeper_id) {
@@ -916,7 +967,12 @@ impl ArticleDedupeState {
         Ok(())
     }
 
-    fn find_existing(&self, guid: Option<&str>, canonical_url: &str, title_key: Option<&str>) -> Option<&String> {
+    fn find_existing(
+        &self,
+        guid: Option<&str>,
+        canonical_url: &str,
+        title_key: Option<&str>,
+    ) -> Option<&String> {
         guid.and_then(|value| self.by_guid.get(value))
             .or_else(|| self.by_url.get(canonical_url))
             .or_else(|| title_key.and_then(|value| self.by_title_published.get(value)))
@@ -1091,8 +1147,11 @@ fn merge_duplicate_article(
     )
     .map_err(|error| format!("Failed to merge duplicate article state: {error}"))?;
 
-    conn.execute("DELETE FROM articles WHERE id = ?1", params![duplicate.id.clone()])
-        .map_err(|error| format!("Failed to remove duplicate article: {error}"))?;
+    conn.execute(
+        "DELETE FROM articles WHERE id = ?1",
+        params![duplicate.id.clone()],
+    )
+    .map_err(|error| format!("Failed to remove duplicate article: {error}"))?;
 
     Ok(())
 }
@@ -1242,17 +1301,7 @@ fn looks_like_literal_html_markdown(input: &str) -> bool {
 
     let lowercase = trimmed.to_ascii_lowercase();
     let markers = [
-        "<p>",
-        "</p>",
-        "<ol>",
-        "</ol>",
-        "<ul>",
-        "</ul>",
-        "<li>",
-        "</li>",
-        "<h1",
-        "<h2",
-        "<h3",
+        "<p>", "</p>", "<ol>", "</ol>", "<ul>", "</ul>", "<li>", "</li>", "<h1", "<h2", "<h3",
         "href=\"",
     ];
     let marker_count = markers
@@ -1381,7 +1430,10 @@ fn article_text_for_ai(conn: &Connection, article_id: &str) -> Result<String, St
     Ok(text)
 }
 
-fn article_blocks_for_translation(conn: &Connection, article_id: &str) -> Result<Vec<String>, String> {
+fn article_blocks_for_translation(
+    conn: &Connection,
+    article_id: &str,
+) -> Result<Vec<String>, String> {
     let (_title, cleaned_markdown, cleaned_html, content, excerpt): (
         String,
         Option<String>,
@@ -1681,7 +1733,11 @@ fn html_to_basic_markdown(html: &str) -> String {
         .replace("\n\n\n", "\n\n")
 }
 
-fn fallback_cleaner_output(html: &str, url: Option<&str>, title_hint: Option<&str>) -> NodeCleanerOutput {
+fn fallback_cleaner_output(
+    html: &str,
+    url: Option<&str>,
+    title_hint: Option<&str>,
+) -> NodeCleanerOutput {
     let sanitized = remove_html_block_case_insensitive(
         &remove_html_block_case_insensitive(
             &remove_html_block_case_insensitive(html, "script"),
@@ -1819,14 +1875,24 @@ async fn fetch_html(url: &str) -> Result<String, String> {
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
         .http1_only()
-        .user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .build()
-        .map_err(|error| format!("Failed to create HTTP client: {}", reqwest_error_details(&error, url)))?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| format!("Failed to fetch article HTML: {}", reqwest_error_details(&error, url)))?;
+        .map_err(|error| {
+            format!(
+                "Failed to create HTTP client: {}",
+                reqwest_error_details(&error, url)
+            )
+        })?;
+    let response = client.get(url).send().await.map_err(|error| {
+        format!(
+            "Failed to fetch article HTML: {}",
+            reqwest_error_details(&error, url)
+        )
+    })?;
 
     if !response.status().is_success() {
         return Err(format!(
@@ -1991,7 +2057,11 @@ fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
 }
 
 #[tauri::command]
-fn list_articles(app: AppHandle, feed_id: Option<String>, read_filter: Option<String>) -> Result<Vec<Article>, String> {
+fn list_articles(
+    app: AppHandle,
+    feed_id: Option<String>,
+    read_filter: Option<String>,
+) -> Result<Vec<Article>, String> {
     let conn = open_database(&app)?;
     list_articles_by_feed(&conn, feed_id.as_deref(), read_filter.as_deref())
 }
@@ -2005,7 +2075,11 @@ fn read_filter_sql(read_filter: Option<&str>) -> Result<&'static str, String> {
     }
 }
 
-fn list_articles_by_feed(conn: &Connection, feed_id: Option<&str>, read_filter: Option<&str>) -> Result<Vec<Article>, String> {
+fn list_articles_by_feed(
+    conn: &Connection,
+    feed_id: Option<&str>,
+    read_filter: Option<&str>,
+) -> Result<Vec<Article>, String> {
     let filter_sql = read_filter_sql(read_filter)?;
     let sql = match feed_id {
         Some(_) => {
@@ -2173,10 +2247,18 @@ fn create_annotation(
     if kind != "highlight" && kind != "note" {
         return Err("Annotation kind must be highlight or note".to_string());
     }
-    if kind == "highlight" && selected_text.as_ref().is_none_or(|value| value.trim().is_empty()) {
+    if kind == "highlight"
+        && selected_text
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
         return Err("Highlight selected text cannot be empty".to_string());
     }
-    if kind == "note" && note_text.as_ref().is_none_or(|value| value.trim().is_empty()) {
+    if kind == "note"
+        && note_text
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
         return Err("Note text cannot be empty".to_string());
     }
 
@@ -2229,7 +2311,10 @@ fn update_annotation(
 fn delete_annotation(app: AppHandle, annotation_id: String) -> Result<(), String> {
     let conn = open_database(&app)?;
     let changed = conn
-        .execute("DELETE FROM annotations WHERE id = ?1", [annotation_id.clone()])
+        .execute(
+            "DELETE FROM annotations WHERE id = ?1",
+            [annotation_id.clone()],
+        )
         .map_err(|error| format!("Failed to delete annotation: {error}"))?;
     if changed == 0 {
         return Err(format!("Annotation {annotation_id} was not found"));
@@ -2309,13 +2394,19 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
         return Ok(article);
     }
 
-    let (html_for_cleaning, raw_html_to_store, final_url) = if let Some(raw_html) =
-        article.raw_html.as_ref().filter(|value| !value.trim().is_empty())
+    let (html_for_cleaning, raw_html_to_store, final_url) = if let Some(raw_html) = article
+        .raw_html
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
     {
         (raw_html.clone(), None, article.final_url.clone())
     } else if safe_fetchable_url(&article.url) {
         match fetch_html(&article.url).await {
-            Ok(fetched_html) => (fetched_html.clone(), Some(fetched_html), Some(article.url.clone())),
+            Ok(fetched_html) => (
+                fetched_html.clone(),
+                Some(fetched_html),
+                Some(article.url.clone()),
+            ),
             Err(_) => {
                 let fallback_html = fallback_html_from_article(&article);
                 (fallback_html, None, article.final_url.clone())
@@ -2361,7 +2452,8 @@ async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article,
         .ok_or_else(|| "Article cleaner returned empty cleaned_html".to_string())?;
     let cleaned_markdown = normalize_optional_text(cleaned.output.cleaned_markdown)
         .ok_or_else(|| "Article cleaner returned empty cleaned_markdown".to_string())?;
-    let title = normalize_optional_text(cleaned.output.title).unwrap_or_else(|| normalized_url.clone());
+    let title =
+        normalize_optional_text(cleaned.output.title).unwrap_or_else(|| normalized_url.clone());
     let author = normalize_optional_text(cleaned.output.byline);
     let excerpt = normalize_optional_text(cleaned.output.excerpt).unwrap_or_default();
     let cleaner_version = cleaned.version;
@@ -2646,6 +2738,67 @@ fn get_llm_config_from_db(conn: &Connection) -> Result<LlmConfig, String> {
     })
 }
 
+fn get_llm_config_for_task(
+    conn: &Connection,
+    base_url_key: &str,
+    api_key_key: &str,
+    model_key: &str,
+    task_label: &str,
+) -> Result<LlmConfig, String> {
+    let base_url =
+        load_task_setting_with_legacy(conn, base_url_key, "llm_base_url")?.unwrap_or_default();
+    if base_url.trim().is_empty() {
+        return Err(format!(
+            "LLM {task_label} API Base URL not configured. Please set it in Settings."
+        ));
+    }
+
+    let api_key =
+        load_task_setting_with_legacy(conn, api_key_key, "llm_api_key")?.unwrap_or_default();
+    let model_name = load_task_setting_with_legacy(conn, model_key, "llm_model_name")?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!("LLM {task_label} model not configured. Please set it in Settings.")
+        })?;
+
+    Ok(LlmConfig {
+        base_url,
+        api_key,
+        model_name,
+    })
+}
+
+fn load_task_setting_with_legacy(
+    conn: &Connection,
+    task_key: &str,
+    legacy_key: &str,
+) -> Result<Option<String>, String> {
+    match load_setting_value(conn, task_key)? {
+        Some(value) => Ok(Some(value)),
+        None => load_setting_value(conn, legacy_key),
+    }
+}
+
+fn get_summary_llm_config_from_db(conn: &Connection) -> Result<LlmConfig, String> {
+    get_llm_config_for_task(
+        conn,
+        "llm_summary_base_url",
+        "llm_summary_api_key",
+        "llm_summary_model_name",
+        "summary",
+    )
+}
+
+fn get_translation_llm_config_from_db(conn: &Connection) -> Result<LlmConfig, String> {
+    get_llm_config_for_task(
+        conn,
+        "llm_translation_base_url",
+        "llm_translation_api_key",
+        "llm_translation_model_name",
+        "translation",
+    )
+}
+
 fn language_name(target_lang: &str) -> &str {
     match target_lang {
         "zh" => "Chinese",
@@ -2736,8 +2889,7 @@ fn get_llm_config(app: AppHandle) -> Result<LlmConfig, String> {
     get_llm_config_from_db(&conn)
 }
 
-#[tauri::command]
-fn summarize_article(
+fn summarize_article_impl(
     app: AppHandle,
     article_id: String,
     target_lang: String,
@@ -2764,7 +2916,7 @@ fn summarize_article(
         }
     }
 
-    let config = get_llm_config_from_db(&conn)?;
+    let config = get_summary_llm_config_from_db(&conn)?;
     let article_text = article_text_for_ai(&conn, &article_id)?;
     let lang_name = language_name(&target_lang);
     let prompt = format!(
@@ -2793,7 +2945,16 @@ fn summarize_article(
 }
 
 #[tauri::command]
-fn translate_article(
+fn summarize_article(
+    app: AppHandle,
+    article_id: String,
+    target_lang: String,
+    force: Option<bool>,
+) -> Result<String, String> {
+    summarize_article_impl(app, article_id, target_lang, force)
+}
+
+fn translate_article_impl(
     app: AppHandle,
     article_id: String,
     target_lang: String,
@@ -2821,15 +2982,17 @@ fn translate_article(
         }
     }
 
-    let config = get_llm_config_from_db(&conn)?;
+    let config = get_translation_llm_config_from_db(&conn)?;
     const TRANSLATION_CHUNK_SIZE: usize = 6;
     let mut translated_chunks = Vec::new();
 
     for (chunk_index, block_chunk) in source_blocks.chunks(TRANSLATION_CHUNK_SIZE).enumerate() {
         let start_index = chunk_index * TRANSLATION_CHUNK_SIZE;
         let formatted_chunk = format_translation_blocks(block_chunk, start_index);
-        let translated_chunk = translate_article_chunk_with_config(&config, &formatted_chunk, &target_lang)?;
-        let parsed_blocks = parse_structured_translation_blocks_from(&translated_chunk, start_index);
+        let translated_chunk =
+            translate_article_chunk_with_config(&config, &formatted_chunk, &target_lang)?;
+        let parsed_blocks =
+            parse_structured_translation_blocks_from(&translated_chunk, start_index);
         if parsed_blocks.len() != block_chunk.len() {
             return Err(format!(
                 "LLM translation did not preserve paragraph structure for chunk {}. Please try again.",
@@ -2842,12 +3005,21 @@ fn translate_article(
     let translation = translated_chunks
         .into_iter()
         .enumerate()
-        .map(|(index, block)| format!("[BLOCK {}]\n{}\n[END BLOCK {}]", index + 1, block, index + 1))
+        .map(|(index, block)| {
+            format!(
+                "[BLOCK {}]\n{}\n[END BLOCK {}]",
+                index + 1,
+                block,
+                index + 1
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n");
 
     if translation_block_count(&translation) != source_block_count {
-        return Err("LLM translation did not preserve paragraph structure. Please try again.".to_string());
+        return Err(
+            "LLM translation did not preserve paragraph structure. Please try again.".to_string(),
+        );
     }
 
     conn.execute(
@@ -2860,6 +3032,117 @@ fn translate_article(
 }
 
 #[tauri::command]
+fn translate_article(
+    app: AppHandle,
+    article_id: String,
+    target_lang: String,
+) -> Result<String, String> {
+    translate_article_impl(app, article_id, target_lang)
+}
+
+fn create_ai_job(kind: &str, article_id: String, target_lang: String) -> AiJobStatus {
+    AiJobStatus {
+        id: Uuid::new_v4().to_string(),
+        kind: kind.to_string(),
+        article_id,
+        target_lang,
+        status: "running".to_string(),
+        result: None,
+        error: None,
+    }
+}
+
+fn store_ai_job(
+    jobs: &Arc<Mutex<HashMap<String, AiJobStatus>>>,
+    job: AiJobStatus,
+) -> Result<(), String> {
+    let mut guard = jobs
+        .lock()
+        .map_err(|_| "AI job state is unavailable".to_string())?;
+    guard.insert(job.id.clone(), job);
+    Ok(())
+}
+
+fn finish_ai_job(
+    jobs: Arc<Mutex<HashMap<String, AiJobStatus>>>,
+    mut job: AiJobStatus,
+    result: Result<String, String>,
+) {
+    match result {
+        Ok(value) => {
+            job.status = "completed".to_string();
+            job.result = Some(value);
+            job.error = None;
+        }
+        Err(error) => {
+            job.status = "failed".to_string();
+            job.result = None;
+            job.error = Some(error);
+        }
+    }
+
+    if let Ok(mut guard) = jobs.lock() {
+        guard.insert(job.id.clone(), job);
+    }
+}
+
+#[tauri::command]
+fn start_summary_job(
+    app: AppHandle,
+    jobs: tauri::State<'_, AiJobState>,
+    article_id: String,
+    target_lang: String,
+    force: Option<bool>,
+) -> Result<AiJobStatus, String> {
+    let job = create_ai_job("summary", article_id.clone(), target_lang.clone());
+    let jobs_map = jobs.jobs.clone();
+    store_ai_job(&jobs_map, job.clone())?;
+
+    let thread_job = job.clone();
+    thread::spawn(move || {
+        let result = summarize_article_impl(app, article_id, target_lang, force);
+        finish_ai_job(jobs_map, thread_job, result);
+    });
+
+    Ok(job)
+}
+
+#[tauri::command]
+fn start_translation_job(
+    app: AppHandle,
+    jobs: tauri::State<'_, AiJobState>,
+    article_id: String,
+    target_lang: String,
+) -> Result<AiJobStatus, String> {
+    let job = create_ai_job("translation", article_id.clone(), target_lang.clone());
+    let jobs_map = jobs.jobs.clone();
+    store_ai_job(&jobs_map, job.clone())?;
+
+    let thread_job = job.clone();
+    thread::spawn(move || {
+        let result = translate_article_impl(app, article_id, target_lang);
+        finish_ai_job(jobs_map, thread_job, result);
+    });
+
+    Ok(job)
+}
+
+#[tauri::command]
+fn get_ai_job_status(
+    jobs: tauri::State<'_, AiJobState>,
+    job_id: String,
+) -> Result<AiJobStatus, String> {
+    let guard = jobs
+        .jobs
+        .lock()
+        .map_err(|_| "AI job state is unavailable".to_string())?;
+    guard
+        .get(&job_id)
+        .cloned()
+        .ok_or_else(|| format!("AI job {job_id} was not found"))
+}
+
+#[tauri::command]
 fn translate_text(app: AppHandle, text: String, target_lang: String) -> Result<String, String> {
     let normalized = normalize_optional_text(Some(text))
         .ok_or_else(|| "Selected text cannot be empty".to_string())?;
@@ -2868,7 +3151,7 @@ fn translate_text(app: AppHandle, text: String, target_lang: String) -> Result<S
     }
 
     let conn = open_database(&app)?;
-    let config = get_llm_config_from_db(&conn)?;
+    let config = get_translation_llm_config_from_db(&conn)?;
     translate_text_with_config(&config, &normalized, &target_lang)
 }
 
@@ -2876,6 +3159,7 @@ fn translate_text(app: AppHandle, text: String, target_lang: String) -> Result<S
 pub fn run() {
     tauri::Builder::default()
         .manage(sync::SyncState::default())
+        .manage(AiJobState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -2903,6 +3187,9 @@ pub fn run() {
             get_llm_config,
             summarize_article,
             translate_article,
+            start_summary_job,
+            start_translation_job,
+            get_ai_job_status,
             translate_text,
             clean_article,
             fetch_and_clean_article,
@@ -2961,9 +3248,11 @@ mod tests {
         save_articles(&conn, feed_id, feed_url, entries).expect("articles should save");
 
         let saved_url: String = conn
-            .query_row("SELECT url FROM articles WHERE feed_id = ?1", params![feed_id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT url FROM articles WHERE feed_id = ?1",
+                params![feed_id],
+                |row| row.get(0),
+            )
             .expect("article url should load");
         assert_eq!(saved_url, "https://soulhacker.me/posts/local-inference");
     }
@@ -2991,9 +3280,11 @@ mod tests {
         save_articles(&conn, feed_id, feed_url, entries).expect("articles should save");
 
         let saved_url: String = conn
-            .query_row("SELECT url FROM articles WHERE feed_id = ?1", params![feed_id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT url FROM articles WHERE feed_id = ?1",
+                params![feed_id],
+                |row| row.get(0),
+            )
             .expect("article url should load");
         assert_eq!(saved_url, "https://example.com/posts/absolute-link");
     }
@@ -3083,7 +3374,8 @@ mod tests {
 
     #[test]
     fn literal_html_markdown_detection_matches_broken_cached_markdown() {
-        let broken = r#"<p>我决定写篇短文</p><ol><li><a href="https://example.com">link</a></li></ol>"#;
+        let broken =
+            r#"<p>我决定写篇短文</p><ol><li><a href="https://example.com">link</a></li></ol>"#;
         let normal = "我决定写篇短文\n\n- 第一条\n- 第二条";
 
         assert!(super::looks_like_literal_html_markdown(broken));
