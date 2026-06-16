@@ -12,6 +12,7 @@
 - 抓取到的 raw_html、cleaned_html、cleaned_markdown 默认保存到本地 SQLite。
 - 用户创建的文章笔记、高亮文本、高亮颜色和高亮样式默认保存到本地 SQLite。
 - Feed / OPML / 刷新阶段只访问用户添加或导入的 URL，以及由这些 URL 指向网页声明或同站点常见路径发现到的 Feed URL。
+- 如果用户在系统中配置了网络代理，Feed / OPML / 刷新、网页抓取和 LLM Provider 请求会按系统代理设置发出；应用不自建代理或云端转发服务。
 - 用户打开订阅文章时，应用会访问该文章 URL 获取网页 HTML，并在本地完成清洗后展示 cleaned_html。
 - 文章原网页正文只在用户主动打开订阅文章、点击清洗或点击抓取时访问。
 
