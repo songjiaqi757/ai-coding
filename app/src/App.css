@@ -273,11 +273,21 @@ button {
 }
 
 .article-list {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   padding: 18px;
   border-right: 1px solid #dbe1ea;
-  overflow-y: auto;
+  overflow: hidden;
   overflow-x: hidden;
+  background: #f3f6fa;
+}
+
+.article-list-header {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  padding-bottom: 14px;
   background: #f3f6fa;
 }
 
@@ -327,7 +337,6 @@ button {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 0;
-  margin-bottom: 14px;
   overflow: hidden;
   border: 1px solid #d0d7e2;
   border-radius: 12px;
@@ -494,9 +503,14 @@ button {
 }
 
 .cards {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-top: 2px;
 }
 
 .article-card {

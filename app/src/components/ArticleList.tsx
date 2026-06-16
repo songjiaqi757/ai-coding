@@ -45,36 +45,38 @@ export function ArticleList({
 
   return (
     <section className="article-list">
-      <div className="toolbar">
-        <div>
-          <h2>{isZh ? "文章" : "Articles"}</h2>
-          <p>{countLabel}</p>
-        </div>
-        <button
-          type="button"
-          className="mark-read-button"
-          onClick={onMarkCurrentFeedRead}
-          disabled={isUpdatingReadStatus || unreadCount === 0}
-        >
-          {isZh ? "全部标为已读" : "Mark all read"}
-        </button>
-      </div>
-
-      <div className="segmented-control">
-        {(["all", "unread", "read"] as const).map((value) => (
+      <div className="article-list-header">
+        <div className="toolbar">
+          <div>
+            <h2>{isZh ? "文章" : "Articles"}</h2>
+            <p>{countLabel}</p>
+          </div>
           <button
             type="button"
-            key={value}
-            className={readFilter === value ? "active" : ""}
-            onClick={() => onReadFilterChange(value)}
+            className="mark-read-button"
+            onClick={onMarkCurrentFeedRead}
+            disabled={isUpdatingReadStatus || unreadCount === 0}
           >
-            {value === "all"
-              ? isZh ? `全部 ${totalCount}` : `All ${totalCount}`
-              : value === "unread"
-                ? isZh ? `未读 ${unreadCount}` : `Unread ${unreadCount}`
-                : isZh ? `已读 ${readCount}` : `Read ${readCount}`}
+            {isZh ? "全部标为已读" : "Mark all read"}
           </button>
-        ))}
+        </div>
+
+        <div className="segmented-control">
+          {(["all", "unread", "read"] as const).map((value) => (
+            <button
+              type="button"
+              key={value}
+              className={readFilter === value ? "active" : ""}
+              onClick={() => onReadFilterChange(value)}
+            >
+              {value === "all"
+                ? isZh ? `全部 ${totalCount}` : `All ${totalCount}`
+                : value === "unread"
+                  ? isZh ? `未读 ${unreadCount}` : `Unread ${unreadCount}`
+                  : isZh ? `已读 ${readCount}` : `Read ${readCount}`}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="cards">
