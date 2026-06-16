@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Article, Feed, SyncStatus, SyncReport, SyncConfig, AppLanguage, OpmlImportReport } from "../types";
-import bookiBuddyLogo from "../assets/bookibuddy-logo.svg";
+import bookiBuddyLogo from "../../src-tauri/icons/128x128.png";
 
 const LOCAL_ONLY_FEED_IDS = ["all", "favorites", "read-later", "saved"];
 const SAVED_ARTICLES_FEED_URL = "bookibuddy://internal/captured-articles";
@@ -278,11 +278,13 @@ export function Sidebar({
       <div className="brand">
         <img className="brand-logo" src={bookiBuddyLogo} alt="BookiBuddy" />
         <div className="brand-copy">
-          <h1>BookiBuddy</h1>
+          <h1 className="brand-wordmark">
+            <span className="brand-wordmark-booki">Booki</span>
+            <span className="brand-wordmark-buddy">Buddy</span>
+          </h1>
           <p>{isZh ? "Your Reading Pal!" : "Your Reading Pal!"}</p>
         </div>
       </div>
-
       <form className="sidebar-search" onSubmit={(event) => onSearch(event)}>
         <div className="search-input-shell">
           <input

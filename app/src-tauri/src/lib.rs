@@ -9,6 +9,7 @@ use reqwest::{
     Client, Url,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1621,25 +1622,66 @@ fn article_blocks_for_translation(
         )
         .map_err(|e| format!("Article not found: {e}"))?;
 
-    let body = normalize_optional_text(cleaned_markdown)
-        .or_else(|| normalize_optional_text(cleaned_html).map(|html| strip_html_tags(&html).replace(". ", ".\n\n")))
-        .or_else(|| normalize_optional_text(Some(content)))
-        .or_else(|| normalize_optional_text(Some(excerpt)))
+    let blocks = normalize_optional_text(cleaned_html)
+        .map(|html| extract_translation_blocks_from_html(&html))
+        .filter(|blocks| !blocks.is_empty())
+        .or_else(|| {
+            normalize_optional_text(cleaned_markdown)
+                .map(|markdown| extract_translation_blocks_from_markdown(&markdown))
+                .filter(|blocks| !blocks.is_empty())
+        })
+        .or_else(|| {
+            normalize_optional_text(Some(content))
+                .map(|body| extract_translation_blocks_from_markdown(&body))
+                .filter(|blocks| !blocks.is_empty())
+        })
+        .filter(|blocks| !blocks.is_empty())
+        .or_else(|| {
+            normalize_optional_text(Some(excerpt))
+                .map(|body| extract_translation_blocks_from_markdown(&body))
+                .filter(|blocks| !blocks.is_empty())
+        })
         .ok_or_else(|| "Article content is empty. Please open the article first so the app can fetch and clean it.".to_string())?;
-
-    let blocks = body
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|block| !block.is_empty())
-        .filter(|block| !is_decorative_markdown_block(block))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
 
     if collapse_whitespace(&blocks.join(" ")).chars().count() < 40 {
         return Err("Article content is too short to translate reliably.".to_string());
     }
 
     Ok(blocks)
+}
+
+fn extract_translation_blocks_from_markdown(markdown: &str) -> Vec<String> {
+    markdown
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|block| !block.is_empty())
+        .filter(|block| !is_decorative_markdown_block(block))
+        .map(|block| collapse_whitespace(&strip_markdown_syntax(block)))
+        .filter(|block| !block.is_empty())
+        .collect()
+}
+
+fn extract_translation_blocks_from_html(html: &str) -> Vec<String> {
+    if html.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let document = Html::parse_fragment(html);
+    let selector = match Selector::parse("h1, h2, h3, h4, h5, h6, p, blockquote, li, pre") {
+        Ok(selector) => selector,
+        Err(_) => return Vec::new(),
+    };
+
+    document
+        .select(&selector)
+        .filter_map(|node| {
+            let text = collapse_whitespace(&node.text().collect::<Vec<_>>().join(" "));
+            if text.is_empty() || is_metadata_line(&text) {
+                return None;
+            }
+            Some(text)
+        })
+        .collect()
 }
 
 fn format_translation_blocks(blocks: &[String], start_index: usize) -> String {
@@ -3075,6 +3117,27 @@ fn translate_article_chunk_with_config(
     Ok(translation)
 }
 
+fn repair_translation_chunk_with_config(
+    config: &LlmConfig,
+    source_blocks: &[String],
+    translated_text: &str,
+    start_index: usize,
+    target_lang: &str,
+) -> Result<String, String> {
+    let lang_name = language_name(target_lang);
+    let source_structure = format_translation_blocks(source_blocks, start_index);
+    let prompt = format!(
+        "Repair the following {} translation so that it uses exactly the same block markers and numbering as the source.\nKeep the translated meaning from the draft when possible.\nReturn only the repaired blocks.\n\nSource block structure:\n{}\n\nDraft translation:\n{}",
+        lang_name, source_structure, translated_text
+    );
+
+    llm_provider::call_llm(
+        config,
+        "You repair structured article translations. Preserve the existing translation, but rewrite the output so it contains exactly the source block markers and no extra text.",
+        &prompt,
+    )
+}
+
 #[tauri::command]
 fn save_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
     let conn = open_database(&app)?;
@@ -3189,8 +3252,18 @@ fn translate_article_impl(
         let formatted_chunk = format_translation_blocks(block_chunk, start_index);
         let translated_chunk =
             translate_article_chunk_with_config(&config, &formatted_chunk, &target_lang)?;
-        let parsed_blocks =
+        let mut parsed_blocks =
             parse_structured_translation_blocks_from(&translated_chunk, start_index);
+        if parsed_blocks.len() != block_chunk.len() {
+            let repaired_chunk = repair_translation_chunk_with_config(
+                &config,
+                block_chunk,
+                &translated_chunk,
+                start_index,
+                &target_lang,
+            )?;
+            parsed_blocks = parse_structured_translation_blocks_from(&repaired_chunk, start_index);
+        }
         if parsed_blocks.len() != block_chunk.len() {
             return Err(format!(
                 "LLM translation did not preserve paragraph structure for chunk {}. Please try again.",
@@ -3401,7 +3474,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{init_schema, save_articles};
+    use super::{article_blocks_for_translation, init_schema, save_articles};
     use rusqlite::{params, Connection};
 
     fn parse_entries(xml: &str) -> Vec<feed_rs::model::Entry> {
@@ -3637,5 +3710,39 @@ mod tests {
 
         assert!(candidates.contains(&"https://example.com/blog/feed.xml".to_string()));
         assert!(!candidates.contains(&"https://example.com/blog/post.html/feed.xml".to_string()));
+    }
+
+    #[test]
+    fn translation_blocks_prefer_cleaned_html_structure() {
+        let conn = setup_connection("feed-4", "https://example.com/feed.xml");
+        conn.execute(
+            "INSERT INTO articles (
+                id, feed_id, title, url, excerpt, content, cleaned_html, cleaned_markdown, content_fetch_status
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "article-translation-1",
+                "feed-4",
+                "Fireworks",
+                "https://example.com/fireworks",
+                "",
+                "",
+                r#"<article><h1>US truck carrying fireworks catches fire, sparking spectacular display</h1><p>No one was harmed in the incident, which saw motorists treated to an early Fourth of July show.</p><figure><img src="https://example.com/a.jpg" alt="cover"></figure><p>Traffic was briefly stopped while firefighters brought the blaze under control.</p></article>"#,
+                "# Wrong title\n\nWrong body",
+                "cleaned"
+            ],
+        )
+        .expect("article should insert");
+
+        let blocks = article_blocks_for_translation(&conn, "article-translation-1")
+            .expect("translation blocks should load");
+
+        assert_eq!(
+            blocks,
+            vec![
+                "US truck carrying fireworks catches fire, sparking spectacular display".to_string(),
+                "No one was harmed in the incident, which saw motorists treated to an early Fourth of July show.".to_string(),
+                "Traffic was briefly stopped while firefighters brought the blaze under control.".to_string(),
+            ]
+        );
     }
 }

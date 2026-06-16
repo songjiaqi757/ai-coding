@@ -101,11 +101,13 @@ type ReaderContentBlock = {
   kind: "heading" | "paragraph" | "quote" | "list" | "code";
 };
 
+const TRANSLATABLE_BLOCK_SELECTOR = "h1, h2, h3, h4, h5, h6, p, blockquote, li, pre";
+
 function extractReaderContentBlocks(html: string): ReaderContentBlock[] {
   if (!html.trim()) return [];
   const document = new DOMParser().parseFromString(`<body>${html}</body>`, "text/html");
   const nodes = Array.from(
-    document.body.querySelectorAll("h1, h2, h3, h4, h5, h6, p, blockquote, li, pre"),
+    document.body.querySelectorAll(TRANSLATABLE_BLOCK_SELECTOR),
   );
 
   return nodes
@@ -149,6 +151,100 @@ function normalizeTranslationText(text: string) {
     .replace(/https?:\/\/\S+/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function normalizeComparableText(text: string) {
+  return normalizeTranslationText(text)
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function textBlocksRoughlyMatch(source: string, candidate: string) {
+  const left = normalizeComparableText(source);
+  const right = normalizeComparableText(candidate);
+  if (!left || !right) return false;
+  if (left === right) return true;
+
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length <= right.length ? right : left;
+  if (shorter.length >= 18 && longer.includes(shorter)) return true;
+
+  if (shorter.length >= 12) {
+    const prefix = shorter.slice(0, Math.min(24, shorter.length));
+    if (longer.includes(prefix)) return true;
+  }
+
+  return false;
+}
+
+function buildTranslationInlineHtml(
+  article: Article,
+  sourceHtml: string,
+  translation: string,
+  emptyText: string,
+  annotations: Annotation[],
+  searchQuery: string,
+) {
+  const sourceBlocks = translationSourceBlocks(article, emptyText);
+  const translatedBlocks = splitTranslationBlocks(translation);
+  if (sourceBlocks.length === 0 || translatedBlocks.length === 0) {
+    return locateHighlights(sourceHtml, annotations, searchQuery);
+  }
+
+  const document = new DOMParser().parseFromString(`<body>${sourceHtml}</body>`, "text/html");
+  const candidateNodes = Array.from(
+    document.body.querySelectorAll<HTMLElement>(TRANSLATABLE_BLOCK_SELECTOR),
+  ).filter((node) => {
+    const text = node.textContent?.trim().replace(/\s+/g, " ") ?? "";
+    return !!text;
+  });
+
+  let nodeCursor = 0;
+  const pairCount = Math.min(sourceBlocks.length, translatedBlocks.length);
+
+  for (let index = 0; index < pairCount; index += 1) {
+    const sourceBlock = sourceBlocks[index];
+    const translatedText = translatedBlocks[index];
+    if (!translatedText) continue;
+
+    let matchedNodeIndex = -1;
+    for (let lookahead = nodeCursor; lookahead < candidateNodes.length; lookahead += 1) {
+      const candidateText = candidateNodes[lookahead].textContent?.trim().replace(/\s+/g, " ") ?? "";
+      if (textBlocksRoughlyMatch(sourceBlock.text, candidateText)) {
+        matchedNodeIndex = lookahead;
+        break;
+      }
+      if (lookahead - nodeCursor >= 6) break;
+    }
+
+    if (matchedNodeIndex === -1) {
+      matchedNodeIndex = nodeCursor < candidateNodes.length ? nodeCursor : -1;
+    }
+    if (matchedNodeIndex === -1) break;
+
+    const targetNode = candidateNodes[matchedNodeIndex];
+    nodeCursor = matchedNodeIndex + 1;
+
+    const translationNode = document.createElement("div");
+    translationNode.className = "inline-translation";
+    translatedText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .forEach((line) => {
+        const paragraph = document.createElement("p");
+        paragraph.textContent = line;
+        translationNode.appendChild(paragraph);
+      });
+
+    if (translationNode.childElementCount > 0) {
+      targetNode.insertAdjacentElement("afterend", translationNode);
+    }
+  }
+
+  return locateHighlights(document.body.innerHTML, annotations, searchQuery);
 }
 
 function detectArticleLanguage(article: Article | null): string {
@@ -264,13 +360,13 @@ function blocksFromMarkdown(markdown: string): ReaderContentBlock[] {
 
 function translationSourceBlocks(article: Article | null, emptyText: string): ReaderContentBlock[] {
   if (!article) return [];
-  if (article.cleanedMarkdown?.trim() && !looksLikeLiteralHtmlMarkdown(article.cleanedMarkdown)) {
-    const markdownBlocks = blocksFromMarkdown(article.cleanedMarkdown);
-    if (markdownBlocks.length > 0) return markdownBlocks;
-  }
   if (article.cleanedHtml?.trim() && !looksLikeEncodedHtmlContent(article.cleanedHtml)) {
     const htmlBlocks = extractReaderContentBlocks(article.cleanedHtml);
     if (htmlBlocks.length > 0) return htmlBlocks;
+  }
+  if (article.cleanedMarkdown?.trim() && !looksLikeLiteralHtmlMarkdown(article.cleanedMarkdown)) {
+    const markdownBlocks = blocksFromMarkdown(article.cleanedMarkdown);
+    if (markdownBlocks.length > 0) return markdownBlocks;
   }
   const fallback = (article.content || article.excerpt || emptyText).trim();
   return fallback
@@ -468,6 +564,7 @@ function App() {
   const [readerFontScale, setReaderFontScale] = useState(DEFAULT_READER_FONT_SCALE);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [articleListWidth, setArticleListWidth] = useState(DEFAULT_ARTICLE_LIST_WIDTH);
+  const [isReaderFullscreen, setIsReaderFullscreen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isUpdatingReadStatus, setIsUpdatingReadStatus] = useState(false);
   const [isCleaningArticle, setIsCleaningArticle] = useState(false);
@@ -503,6 +600,10 @@ function App() {
   const [summaryCache, setSummaryCache] = useState<Record<string, Record<string, string>>>({});
   const isSummaryLangPinnedRef = useRef(false);
   const readerSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const preFullscreenWidthsRef = useRef<{
+    sidebarWidth: number;
+    articleListWidth: number;
+  } | null>(null);
 
   // Sync status
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
@@ -1013,17 +1114,21 @@ function App() {
     looksLikeLiteralHtmlMarkdown(selectedArticle.cleanedMarkdown)
   );
 
-  const readerHtml = useMemo(() => {
+  const readerSourceHtml = useMemo(() => {
     if (!selectedArticle) return "";
-    const source = selectedArticle.cleanedHtml?.trim() && !looksLikeEncodedHtmlContent(selectedArticle.cleanedHtml)
+    return selectedArticle.cleanedHtml?.trim() && !looksLikeEncodedHtmlContent(selectedArticle.cleanedHtml)
       ? selectedArticle.cleanedHtml
       : selectedArticle.content?.trim()
         ? selectedArticle.content
         : selectedArticle.excerpt.trim()
           ? `<p>${escapeHtml(selectedArticle.excerpt)}</p>`
           : `<p>${isZh ? "暂无可显示内容" : "No readable content available."}</p>`;
-    return locateHighlights(source, annotations, activeReaderSearchQuery);
-  }, [activeReaderSearchQuery, annotations, isZh, selectedArticle]);
+  }, [isZh, selectedArticle]);
+
+  const readerHtml = useMemo(
+    () => locateHighlights(readerSourceHtml, annotations, activeReaderSearchQuery),
+    [activeReaderSearchQuery, annotations, readerSourceHtml],
+  );
 
   const bodySearchMatchCount = useMemo(() => {
     if (!readerHtml || !activeReaderSearchQuery) return 0;
@@ -1041,6 +1146,17 @@ function App() {
     : null;
   const hasActiveSummary = !!activeSummary;
   const hasActiveTranslation = !!selectedArticle?.translation && selectedArticle.translationLang === targetLang;
+  const translatedReaderHtml = useMemo(() => {
+    if (!selectedArticle || !hasActiveTranslation || !selectedArticle.translation) return "";
+    return buildTranslationInlineHtml(
+      selectedArticle,
+      readerSourceHtml,
+      selectedArticle.translation,
+      isZh ? "暂无可显示内容" : "No readable content available.",
+      annotations,
+      activeReaderSearchQuery,
+    );
+  }, [activeReaderSearchQuery, annotations, hasActiveTranslation, isZh, readerSourceHtml, selectedArticle]);
   const isCurrentSummaryRunning =
     !!selectedArticle &&
     isSummarizing &&
@@ -1057,21 +1173,6 @@ function App() {
     readView === "translation" && hasActiveTranslation
       ? targetLang
       : detectArticleLanguage(selectedArticle);
-  const translationPairs = useMemo(() => {
-    if (!hasActiveTranslation || !selectedArticle?.translation) return [];
-    const originalBlocks = translationSourceBlocks(
-      selectedArticle,
-      isZh ? "暂无可显示内容" : "No readable content available.",
-    );
-    const translatedBlocks = splitTranslationBlocks(selectedArticle.translation);
-    const total = Math.max(originalBlocks.length, translatedBlocks.length);
-    return Array.from({ length: total }, (_, index) => ({
-      id: `pair-${index}`,
-      original: originalBlocks[index] ?? null,
-      translation: translatedBlocks[index] ?? "",
-    })).filter((pair) => pair.original || pair.translation);
-  }, [hasActiveTranslation, isZh, selectedArticle]);
-
   useEffect(() => {
     if (!selectedArticle) return;
     const hasCleanedHtml = !!selectedArticle.cleanedHtml?.trim();
@@ -1754,7 +1855,7 @@ function App() {
   }, [clampColumnWidths]);
 
   function handleColumnResizeStart(target: ColumnResizeTarget, event: ReactMouseEvent<HTMLButtonElement>) {
-    if (window.innerWidth <= 900) return;
+    if (window.innerWidth <= 900 || isReaderFullscreen) return;
     event.preventDefault();
     columnResizeRef.current = {
       target,
@@ -1765,15 +1866,31 @@ function App() {
     document.body.classList.add("column-resizing");
   }
 
+  function toggleReaderFullscreen() {
+    setIsReaderFullscreen((current) => {
+      if (!current) {
+        preFullscreenWidthsRef.current = {
+          sidebarWidth,
+          articleListWidth,
+        };
+      } else if (preFullscreenWidthsRef.current) {
+        setSidebarWidth(preFullscreenWidthsRef.current.sidebarWidth);
+        setArticleListWidth(preFullscreenWidthsRef.current.articleListWidth);
+      }
+
+      return !current;
+    });
+  }
+
   return (
     <main
       ref={appShellRef}
-      className="app-shell"
+      className={isReaderFullscreen ? "app-shell reader-fullscreen" : "app-shell"}
       style={
         {
-          "--sidebar-width": `${sidebarWidth}px`,
-          "--article-list-width": `${articleListWidth}px`,
-          "--column-divider-width": `${COLUMN_DIVIDER_WIDTH}px`,
+          "--sidebar-width": `${isReaderFullscreen ? 0 : sidebarWidth}px`,
+          "--article-list-width": `${isReaderFullscreen ? 0 : articleListWidth}px`,
+          "--column-divider-width": `${isReaderFullscreen ? 0 : COLUMN_DIVIDER_WIDTH}px`,
         } as CSSProperties
       }
     >
@@ -1903,6 +2020,32 @@ function App() {
             <div className="reader-header">
               <div className="reader-toolbar">
                 <div className="reader-nav" aria-label="Reader navigation">
+                  <button
+                    type="button"
+                    className={isReaderFullscreen ? "reader-action-button active" : "reader-action-button"}
+                    onClick={toggleReaderFullscreen}
+                    title={isReaderFullscreen ? (isZh ? "退出全屏阅读" : "Exit fullscreen reading") : isZh ? "全屏阅读" : "Fullscreen reading"}
+                    aria-label={isReaderFullscreen ? (isZh ? "退出全屏阅读" : "Exit fullscreen reading") : isZh ? "全屏阅读" : "Fullscreen reading"}
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      {isReaderFullscreen ? (
+                        <>
+                          <path d="M7 4.5H4.5V7" />
+                          <path d="M13 4.5h2.5V7" />
+                          <path d="M7 15.5H4.5V13" />
+                          <path d="M13 15.5h2.5V13" />
+                        </>
+                      ) : (
+                        <>
+                          <path d="M4.5 7V4.5H7" />
+                          <path d="M13 4.5h2.5V7" />
+                          <path d="M4.5 13v2.5H7" />
+                          <path d="M13 15.5h2.5V13" />
+                        </>
+                      )}
+                    </svg>
+                    <span>{isZh ? "全屏" : "Fullscreen"}</span>
+                  </button>
                   <button
                     type="button"
                     className="reader-nav-button"
@@ -2181,37 +2324,18 @@ function App() {
                     style={{ "--reader-font-scale": readerFontScale } as CSSProperties}
                     onScroll={handleReaderPaneScroll}
                   >
-              {readView === "original" && (
-                <div
-                  ref={readerHtmlRef}
-                  className="reader-html-content"
-                  onMouseUp={handleReaderSelection}
-                  onClick={handleReaderContentClick}
-                  dangerouslySetInnerHTML={{ __html: readerHtml }}
-                />
-              )}
-
-              {readView === "translation" && hasActiveTranslation && (
-                <div className="translation-pairs">
-                  {translationPairs.map((pair) => (
-                    <section className="translation-pair" key={pair.id}>
-                      {pair.original && (
-                        <div
-                          className={`translation-original translation-original-${pair.original.kind}`}
-                          dangerouslySetInnerHTML={{ __html: pair.original.html }}
-                        />
-                      )}
-                      {pair.translation && (
-                        <div className="translation-rendered">
-                          {pair.translation.split("\n").map((line, index) => (
-                            <p key={`${pair.id}-line-${index}`}>{line}</p>
-                          ))}
-                        </div>
-                      )}
-                    </section>
-                  ))}
-                </div>
-              )}
+                    <div
+                      ref={readerHtmlRef}
+                      className={readView === "translation" ? "reader-html-content translation-inline-view" : "reader-html-content"}
+                      onMouseUp={readView === "original" ? handleReaderSelection : undefined}
+                      onClick={handleReaderContentClick}
+                      dangerouslySetInnerHTML={{
+                        __html:
+                          readView === "translation" && hasActiveTranslation
+                            ? translatedReaderHtml
+                            : readerHtml,
+                      }}
+                    />
                   </div>
                   {isAnnotationDrawerOpen && selectedArticle && (
                     <aside ref={annotationPanelRef} className="annotation-panel">
