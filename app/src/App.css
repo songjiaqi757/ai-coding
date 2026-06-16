@@ -31,10 +31,21 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(220px, 260px) minmax(280px, 360px) minmax(0, 1fr);
+  grid-template-columns:
+    minmax(0, var(--sidebar-width, 248px))
+    var(--column-divider-width, 12px)
+    minmax(0, var(--article-list-width, 336px))
+    var(--column-divider-width, 12px)
+    minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
   background: #eef1f5;
+}
+
+.column-resizing,
+.column-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .sidebar {
@@ -47,21 +58,63 @@ button {
   background: #f8fafc;
 }
 
+.column-divider {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.column-divider::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 0%, rgb(148 163 184 / 12%) 10%, rgb(148 163 184 / 12%) 90%, transparent 100%);
+}
+
+.column-divider-handle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 52px;
+  border-radius: 999px;
+  background: #c7d2e2;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 4px #eef1f5;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.column-divider:hover .column-divider-handle,
+.column-divider:focus-visible .column-divider-handle {
+  background: #5b8def;
+  box-shadow: 0 0 0 4px #dbeafe;
+}
+
+.column-divider:focus-visible {
+  outline: none;
+}
+
 .brand {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
 }
 
 .brand-logo {
   display: block;
-  width: 74px;
-  height: 74px;
+  width: 62px;
+  height: 62px;
   flex-shrink: 0;
 }
 
 .brand-copy {
   min-width: 0;
+  overflow: hidden;
 }
 
 .brand h1,
@@ -71,8 +124,11 @@ button {
 }
 
 .brand h1 {
-  font-size: 24px;
+  font-size: 22px;
   letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .brand p,
@@ -80,6 +136,12 @@ button {
   margin: 4px 0 0;
   color: #6b7280;
   font-size: 13px;
+}
+
+.brand p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-section {
@@ -1107,7 +1169,12 @@ button {
 
 @media (max-width: 1200px) {
   .app-shell {
-    grid-template-columns: minmax(200px, 220px) minmax(240px, 300px) minmax(0, 1fr);
+    grid-template-columns:
+      minmax(0, var(--sidebar-width, 220px))
+      var(--column-divider-width, 12px)
+      minmax(0, var(--article-list-width, 300px))
+      var(--column-divider-width, 12px)
+      minmax(0, 1fr);
   }
 
   .reader-toolbar,
@@ -1130,6 +1197,10 @@ button {
     grid-template-columns: 1fr;
     height: auto;
     min-height: 100vh;
+  }
+
+  .column-divider {
+    display: none;
   }
 
   .sidebar,
@@ -1489,6 +1560,12 @@ button {
   margin-bottom: 8px;
 }
 
+.ai-result-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .ai-result-label {
   color: #059669;
   font-size: 12px;
@@ -1513,6 +1590,16 @@ button {
   color: #166534;
   font-size: 12px;
   font-weight: 600;
+}
+
+.summary-generate-button {
+  padding: 6px 12px;
+  border: 1px solid #86efac;
+  border-radius: 10px;
+  background: white;
+  color: #15803d;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .action-loading {

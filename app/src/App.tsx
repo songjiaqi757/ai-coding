@@ -43,6 +43,7 @@ type PendingTextSelection = {
 };
 type SearchScope = "all" | "feed";
 type HighlightStyle = "background" | "text" | "underline";
+type ColumnResizeTarget = "sidebar" | "articles";
 
 const SMART_FAVORITES = "favorites";
 const SMART_READ_LATER = "read-later";
@@ -52,6 +53,14 @@ const HIGHLIGHT_COLORS = ["#ffd400", "#ff5f67", "#58b83d", "#33a6d8", "#9b7de3",
 const DEFAULT_HIGHLIGHT_COLOR = HIGHLIGHT_COLORS[0];
 const DEFAULT_HIGHLIGHT_STYLE: HighlightStyle = "background";
 const DEFAULT_READER_FONT_SCALE = 1;
+const DEFAULT_SIDEBAR_WIDTH = 248;
+const DEFAULT_ARTICLE_LIST_WIDTH = 336;
+const MIN_SIDEBAR_WIDTH = 236;
+const MAX_SIDEBAR_WIDTH = 420;
+const MIN_ARTICLE_LIST_WIDTH = 260;
+const MAX_ARTICLE_LIST_WIDTH = 520;
+const MIN_READER_WIDTH = 360;
+const COLUMN_DIVIDER_WIDTH = 12;
 const markdownRenderer = new MarkdownIt({
   html: false,
   linkify: true,
@@ -421,6 +430,7 @@ function locateHighlights(html: string, annotations: Annotation[], searchQuery: 
 }
 
 function App() {
+  const appShellRef = useRef<HTMLElement | null>(null);
   const readerHtmlRef = useRef<HTMLDivElement | null>(null);
   const readerContentRef = useRef<HTMLDivElement | null>(null);
   const readerPaneRef = useRef<HTMLDivElement | null>(null);
@@ -428,6 +438,12 @@ function App() {
   const pendingTextSelectionRef = useRef<PendingTextSelection | null>(null);
   const suppressSelectionUntilRef = useRef(0);
   const autoReadMarkedIdsRef = useRef<Set<string>>(new Set());
+  const columnResizeRef = useRef<{
+    target: ColumnResizeTarget;
+    startX: number;
+    startSidebarWidth: number;
+    startArticleListWidth: number;
+  } | null>(null);
   const [feeds, setFeeds] = useState<Feed[]>([]);
   const [articles, setArticles] = useState<Article[]>([]);
   const [searchResults, setSearchResults] = useState<Article[] | null>(null);
@@ -460,6 +476,8 @@ function App() {
   const [selectedHighlightColor, setSelectedHighlightColor] = useState(DEFAULT_HIGHLIGHT_COLOR);
   const [selectedHighlightStyle, setSelectedHighlightStyle] = useState<HighlightStyle>(DEFAULT_HIGHLIGHT_STYLE);
   const [readerFontScale, setReaderFontScale] = useState(DEFAULT_READER_FONT_SCALE);
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [articleListWidth, setArticleListWidth] = useState(DEFAULT_ARTICLE_LIST_WIDTH);
   const [isLoading, setIsLoading] = useState(true);
   const [isUpdatingReadStatus, setIsUpdatingReadStatus] = useState(false);
   const [isCleaningArticle, setIsCleaningArticle] = useState(false);
@@ -586,6 +604,32 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      const savedSidebarWidth = window.localStorage.getItem("bookibuddy.sidebarWidth");
+      const savedArticleListWidth = window.localStorage.getItem("bookibuddy.articleListWidth");
+      if (savedSidebarWidth) {
+        const parsed = Number(savedSidebarWidth);
+        if (Number.isFinite(parsed)) setSidebarWidth(parsed);
+      }
+      if (savedArticleListWidth) {
+        const parsed = Number(savedArticleListWidth);
+        if (Number.isFinite(parsed)) setArticleListWidth(parsed);
+      }
+    } catch {
+      // Ignore localStorage issues.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("bookibuddy.sidebarWidth", String(Math.round(sidebarWidth)));
+      window.localStorage.setItem("bookibuddy.articleListWidth", String(Math.round(articleListWidth)));
+    } catch {
+      // Ignore localStorage issues.
+    }
+  }, [articleListWidth, sidebarWidth]);
 
   const refreshFeeds = useCallback(async () => {
     try {
@@ -728,6 +772,7 @@ function App() {
     try {
       setIsSummarizing(true);
       setAiError(null);
+      setSummaryLang(lang);
       const job = await invoke<AiJobStatus>("start_summary_job", {
         articleId: selectedArticle.id,
         targetLang: lang,
@@ -1611,8 +1656,108 @@ function App() {
     return () => window.cancelAnimationFrame(frame);
   }, [activeSearchQuery, annotations, selectedArticle?.id, readerHtml]);
 
+  const clampColumnWidths = useCallback((nextSidebarWidth: number, nextArticleListWidth: number) => {
+    const shellWidth = appShellRef.current?.clientWidth ?? 0;
+    let sidebar = Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, nextSidebarWidth));
+    let articleList = Math.max(MIN_ARTICLE_LIST_WIDTH, Math.min(MAX_ARTICLE_LIST_WIDTH, nextArticleListWidth));
+
+    if (shellWidth <= 0) {
+      return {
+        sidebarWidth: Math.round(sidebar),
+        articleListWidth: Math.round(articleList),
+      };
+    }
+
+    const availableWidth = shellWidth - COLUMN_DIVIDER_WIDTH * 2;
+    const maxSidebarWidth = Math.max(MIN_SIDEBAR_WIDTH, availableWidth - MIN_ARTICLE_LIST_WIDTH - MIN_READER_WIDTH);
+    sidebar = Math.min(sidebar, maxSidebarWidth);
+
+    const maxArticleListWidth = Math.max(MIN_ARTICLE_LIST_WIDTH, availableWidth - sidebar - MIN_READER_WIDTH);
+    articleList = Math.min(articleList, maxArticleListWidth);
+
+    const totalRequiredWidth = sidebar + articleList + MIN_READER_WIDTH;
+    if (totalRequiredWidth > availableWidth) {
+      const overflow = totalRequiredWidth - availableWidth;
+      const articleShrink = Math.min(overflow, Math.max(0, articleList - MIN_ARTICLE_LIST_WIDTH));
+      articleList -= articleShrink;
+      const remainingOverflow = overflow - articleShrink;
+      if (remainingOverflow > 0) {
+        sidebar -= Math.min(remainingOverflow, Math.max(0, sidebar - MIN_SIDEBAR_WIDTH));
+      }
+    }
+
+    return {
+      sidebarWidth: Math.round(Math.max(MIN_SIDEBAR_WIDTH, sidebar)),
+      articleListWidth: Math.round(Math.max(MIN_ARTICLE_LIST_WIDTH, articleList)),
+    };
+  }, []);
+
+  useEffect(() => {
+    function syncColumnWidths() {
+      if (window.innerWidth <= 900) return;
+      const clamped = clampColumnWidths(sidebarWidth, articleListWidth);
+      if (clamped.sidebarWidth !== sidebarWidth) setSidebarWidth(clamped.sidebarWidth);
+      if (clamped.articleListWidth !== articleListWidth) setArticleListWidth(clamped.articleListWidth);
+    }
+
+    syncColumnWidths();
+    window.addEventListener("resize", syncColumnWidths);
+    return () => window.removeEventListener("resize", syncColumnWidths);
+  }, [articleListWidth, clampColumnWidths, sidebarWidth]);
+
+  useEffect(() => {
+    function handlePointerMove(event: PointerEvent) {
+      const state = columnResizeRef.current;
+      if (!state || window.innerWidth <= 900) return;
+
+      const deltaX = event.clientX - state.startX;
+      const nextSidebarWidth = state.target === "sidebar" ? state.startSidebarWidth + deltaX : state.startSidebarWidth;
+      const nextArticleListWidth =
+        state.target === "articles" ? state.startArticleListWidth + deltaX : state.startArticleListWidth;
+      const clamped = clampColumnWidths(nextSidebarWidth, nextArticleListWidth);
+      setSidebarWidth(clamped.sidebarWidth);
+      setArticleListWidth(clamped.articleListWidth);
+    }
+
+    function handlePointerUp() {
+      if (!columnResizeRef.current) return;
+      columnResizeRef.current = null;
+      document.body.classList.remove("column-resizing");
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      document.body.classList.remove("column-resizing");
+    };
+  }, [clampColumnWidths]);
+
+  function handleColumnResizeStart(target: ColumnResizeTarget, event: ReactMouseEvent<HTMLButtonElement>) {
+    if (window.innerWidth <= 900) return;
+    event.preventDefault();
+    columnResizeRef.current = {
+      target,
+      startX: event.clientX,
+      startSidebarWidth: sidebarWidth,
+      startArticleListWidth: articleListWidth,
+    };
+    document.body.classList.add("column-resizing");
+  }
+
   return (
-    <main className="app-shell">
+    <main
+      ref={appShellRef}
+      className="app-shell"
+      style={
+        {
+          "--sidebar-width": `${sidebarWidth}px`,
+          "--article-list-width": `${articleListWidth}px`,
+          "--column-divider-width": `${COLUMN_DIVIDER_WIDTH}px`,
+        } as CSSProperties
+      }
+    >
       <Sidebar
         feeds={feeds}
         allArticleCount={allArticleCount}
@@ -1626,6 +1771,15 @@ function App() {
         onFeedsChange={loadData}
         onSyncStatusChange={refreshSyncStatus}
       />
+      <button
+        type="button"
+        className="column-divider"
+        aria-label={isZh ? "调整订阅栏宽度" : "Resize subscriptions panel"}
+        title={isZh ? "拖动调整订阅栏宽度" : "Drag to resize subscriptions panel"}
+        onMouseDown={(event) => handleColumnResizeStart("sidebar", event)}
+      >
+        <span className="column-divider-handle" aria-hidden="true" />
+      </button>
       <ArticleList
         articles={visibleArticles}
         totalCount={totalCount}
@@ -1658,6 +1812,15 @@ function App() {
         onMarkCurrentFeedRead={handleMarkCurrentFeedRead}
         highlightText={(text) => highlightText(text, activeSearchQuery)}
       />
+      <button
+        type="button"
+        className="column-divider"
+        aria-label={isZh ? "调整文章栏宽度" : "Resize articles panel"}
+        title={isZh ? "拖动调整文章栏宽度" : "Drag to resize articles panel"}
+        onMouseDown={(event) => handleColumnResizeStart("articles", event)}
+      >
+        <span className="column-divider-handle" aria-hidden="true" />
+      </button>
 
       <article className="reader">
         {errorMessage && <div className="error-box">{errorMessage}</div>}
@@ -1857,37 +2020,45 @@ function App() {
 
             {aiError && <div className="error-box">{aiError}</div>}
 
-            {(hasActiveSummary || isCurrentSummaryRunning) && selectedArticle && (
+            {selectedArticle && (
               <div className="ai-result-section">
                 <div className="ai-result-header">
                   <div className="ai-result-label">{isZh ? "摘要" : "Summary"}</div>
-                  <select
-                    className="summary-lang-select"
-                    value={summaryLang}
-                    onChange={(event) => {
-                      const nextLang = event.target.value;
-                      isSummaryLangPinnedRef.current = nextLang !== targetLang;
-                      setSummaryLang(nextLang);
-                      if (!selectedArticle) return;
-                      const cachedSummary = summaryCache[selectedArticle.id]?.[nextLang];
-                      const currentArticleSummary = selectedArticle.summaryLang === nextLang ? selectedArticle.summary : null;
-                      if (!cachedSummary && !currentArticleSummary) {
-                        void handleSummarize(false, nextLang);
-                      }
-                    }}
-                  >
-                    <option value="zh">{isZh ? "中文" : "Chinese"}</option>
-                    <option value="en">{isZh ? "英文" : "English"}</option>
-                    <option value="ja">{isZh ? "日文" : "Japanese"}</option>
-                    <option value="ko">{isZh ? "韩文" : "Korean"}</option>
-                  </select>
+                  <div className="ai-result-actions">
+                    <select
+                      className="summary-lang-select"
+                      value={summaryLang}
+                      onChange={(event) => {
+                        const nextLang = event.target.value;
+                        isSummaryLangPinnedRef.current = true;
+                        setSummaryLang(nextLang);
+                      }}
+                    >
+                      <option value="zh">{isZh ? "中文" : "Chinese"}</option>
+                      <option value="en">{isZh ? "英文" : "English"}</option>
+                      <option value="ja">{isZh ? "日文" : "Japanese"}</option>
+                      <option value="ko">{isZh ? "韩文" : "Korean"}</option>
+                    </select>
+                    <button
+                      type="button"
+                      className={isCurrentSummaryRunning ? "summary-generate-button action-loading" : "summary-generate-button"}
+                      onClick={() => void handleSummarize(!!hasActiveSummary, summaryLang)}
+                      disabled={isCurrentSummaryRunning || isSummarizing}
+                    >
+                      {isCurrentSummaryRunning
+                        ? (isZh ? "生成中..." : "Generating...")
+                        : hasActiveSummary
+                          ? (isZh ? "重新生成" : "Regenerate")
+                          : (isZh ? "生成摘要" : "Generate")}
+                    </button>
+                  </div>
                 </div>
                 <div className="ai-result-content">
                   {hasActiveSummary
                     ? activeSummary
                     : isCurrentSummaryRunning
                       ? (isZh ? "正在生成该语言的摘要..." : "Generating summary in this language...")
-                      : (isZh ? "当前语言还没有摘要。" : "No summary yet in this language.")}
+                      : (isZh ? "先选择语言，再点击“生成摘要”。" : "Choose a language, then click Generate.")}
                 </div>
               </div>
             )}

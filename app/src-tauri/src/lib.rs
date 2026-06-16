@@ -2975,6 +2975,52 @@ fn language_name(target_lang: &str) -> &str {
     }
 }
 
+fn summary_prompts(target_lang: &str, article_text: &str) -> (String, String) {
+    match target_lang {
+        "zh" => (
+            "你是一位擅长总结长文的中文编辑。请用自然、准确、克制的中文写摘要，只输出摘要正文，不要加标题、说明、项目符号或客套话。".to_string(),
+            format!(
+                "请阅读下面的文章，并用简体中文写 2-3 句话的摘要。\n要求：\n1. 只保留文章最重要的信息。\n2. 语言自然、清晰、简洁。\n3. 不要照抄原文长句，不要添加原文没有的信息。\n4. 直接输出摘要，不要写“摘要：”之类的前缀。\n\n{}",
+                article_text
+            ),
+        ),
+        "en" => (
+            "You are an editor who writes concise, natural English summaries. Output only the summary itself, with no title, bullets, or extra commentary.".to_string(),
+            format!(
+                "Read the following article and write a concise 2-3 sentence summary in English.\nRequirements:\n1. Keep only the most important information.\n2. Write in natural, clear prose.\n3. Do not copy long sentences directly from the source.\n4. Do not add any introduction such as 'Summary:'.\n\n{}",
+                article_text
+            ),
+        ),
+        "ja" => (
+            "あなたは長文を要点だけにまとめる日本語編集者です。自然で簡潔な日本語で要約し、要約本文だけを出力してください。見出しや箇条書きや説明は不要です。".to_string(),
+            format!(
+                "次の記事を読み、日本語で 2〜3 文の要約を書いてください。\n要件:\n1. 最も重要な情報だけを残すこと。\n2. 自然で明確、簡潔な日本語にすること。\n3. 原文の長い文をそのまま写しすぎないこと。\n4. 「要約:」のような前置きは付けないこと。\n\n{}",
+                article_text
+            ),
+        ),
+        "ko" => (
+            "당신은 긴 글의 핵심을 간결하게 정리하는 한국어 편집자입니다. 자연스럽고 명확한 한국어로 요약만 출력하고, 제목이나 불릿이나 부가 설명은 넣지 마세요.".to_string(),
+            format!(
+                "다음 글을 읽고 한국어로 2-3문장 요약을 작성하세요.\n요구사항:\n1. 가장 중요한 정보만 남길 것.\n2. 자연스럽고 명확하며 간결한 문장으로 쓸 것.\n3. 원문의 긴 문장을 그대로 베끼지 말 것.\n4. '요약:' 같은 머리말을 붙이지 말 것.\n\n{}",
+                article_text
+            ),
+        ),
+        _ => {
+            let lang_name = language_name(target_lang);
+            (
+                format!(
+                    "You are a helpful assistant that summarizes articles concisely in {}. Reply with the summary only.",
+                    lang_name
+                ),
+                format!(
+                    "Summarize the following article in 2-3 sentences in {}. Reply with the summary only.\n\n{}",
+                    lang_name, article_text
+                ),
+            )
+        }
+    }
+}
+
 fn translate_text_with_config(
     config: &LlmConfig,
     text: &str,
@@ -3081,19 +3127,8 @@ fn summarize_article_impl(
 
     let config = get_summary_llm_config_from_db(&conn)?;
     let article_text = article_text_for_ai(&conn, &article_id)?;
-    let lang_name = language_name(&target_lang);
-    let prompt = format!(
-        "Summarize the following article in 2-3 sentences in {}. Reply with the summary only.\n\n{}",
-        lang_name, article_text
-    );
-    let summary = llm_provider::call_llm(
-        &config,
-        &format!(
-            "You are a helpful assistant that summarizes articles concisely in {}.",
-            lang_name
-        ),
-        &prompt,
-    )?;
+    let (system_prompt, user_prompt) = summary_prompts(&target_lang, &article_text);
+    let summary = llm_provider::call_llm(&config, &system_prompt, &user_prompt)?;
     if is_invalid_ai_result(&summary) {
         return Err("LLM returned an invalid summary. Please check the configured model/provider and try again.".to_string());
     }
