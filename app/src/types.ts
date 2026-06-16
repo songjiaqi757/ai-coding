@@ -10,6 +10,16 @@ export type Feed = {
   lastSyncAt: string | null;
 };
 
+export type OpmlImportFailure = {
+  url: string;
+  error: string;
+};
+
+export type OpmlImportReport = {
+  importedFeeds: Feed[];
+  failedFeeds: OpmlImportFailure[];
+};
+
 export type SyncPhase = "idle" | "running" | "success" | "failed";
 export type ReadFilter = "all" | "unread" | "read";
 

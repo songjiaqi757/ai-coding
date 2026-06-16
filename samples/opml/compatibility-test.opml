@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head>
+    <title>Mercury Feed Compatibility Test</title>
+  </head>
+  <body>
+    <outline text="Core Formats" title="Core Formats">
+      <outline text="Hacker News" title="Hacker News" type="rss" xmlUrl="https://hnrss.org/frontpage" htmlUrl="https://news.ycombinator.com" />
+      <outline text="xkcd" title="xkcd" type="atom" xmlUrl="https://xkcd.com/atom.xml" htmlUrl="https://xkcd.com" />
+      <outline text="Daring Fireball JSON Feed" title="Daring Fireball JSON Feed" type="json" xmlUrl="https://daringfireball.net/feeds/json" htmlUrl="https://daringfireball.net" />
+      <outline text="Planet Python" title="Planet Python" type="rss" xmlUrl="https://planetpython.org/rss20.xml" htmlUrl="https://planetpython.org" />
+    </outline>
+    <outline text="Tech News" title="Tech News">
+      <outline text="The Verge" title="The Verge" type="rss" xmlUrl="https://www.theverge.com/rss/index.xml" htmlUrl="https://www.theverge.com" />
+      <outline text="TechCrunch" title="TechCrunch" type="rss" xmlUrl="https://techcrunch.com/feed/" htmlUrl="https://techcrunch.com" />
+      <outline text="Ars Technica" title="Ars Technica" type="rss" xmlUrl="https://feeds.arstechnica.com/arstechnica/index" htmlUrl="https://arstechnica.com" />
+      <outline text="Engadget" title="Engadget" type="rss" xmlUrl="https://www.engadget.com/rss.xml" htmlUrl="https://www.engadget.com" />
+      <outline text="Phoronix" title="Phoronix" type="rss" xmlUrl="https://www.phoronix.com/rss.php" htmlUrl="https://www.phoronix.com" />
+    </outline>
+    <outline text="Engineering Blogs" title="Engineering Blogs">
+      <outline text="Rust Blog" title="Rust Blog" type="rss" xmlUrl="https://blog.rust-lang.org/feed.xml" htmlUrl="https://blog.rust-lang.org" />
+      <outline text="Go Blog" title="Go Blog" type="atom" xmlUrl="https://go.dev/blog/feed.atom" htmlUrl="https://go.dev/blog" />
+      <outline text="GitHub Blog" title="GitHub Blog" type="rss" xmlUrl="https://github.blog/feed/" htmlUrl="https://github.blog" />
+      <outline text="Cloudflare Blog" title="Cloudflare Blog" type="rss" xmlUrl="https://blog.cloudflare.com/rss/" htmlUrl="https://blog.cloudflare.com" />
+      <outline text="Simon Willison" title="Simon Willison" type="atom" xmlUrl="https://simonwillison.net/atom/everything/" htmlUrl="https://simonwillison.net" />
+      <outline text="Julia Evans" title="Julia Evans" type="atom" xmlUrl="https://jvns.ca/atom.xml" htmlUrl="https://jvns.ca" />
+      <outline text="Overreacted" title="Overreacted" type="rss" xmlUrl="https://overreacted.io/rss.xml" htmlUrl="https://overreacted.io" />
+    </outline>
+    <outline text="Science and Learning" title="Science and Learning">
+      <outline text="NASA Breaking News" title="NASA Breaking News" type="rss" xmlUrl="https://www.nasa.gov/news-release/feed/" htmlUrl="https://www.nasa.gov" />
+      <outline text="Nature" title="Nature" type="rss" xmlUrl="https://www.nature.com/nature.rss" htmlUrl="https://www.nature.com/nature" />
+      <outline text="Quanta Magazine" title="Quanta Magazine" type="rss" xmlUrl="https://www.quantamagazine.org/feed/" htmlUrl="https://www.quantamagazine.org" />
+    </outline>
+    <outline text="Chinese Feeds" title="Chinese Feeds">
+      <outline text="阮一峰的网络日志" title="阮一峰的网络日志" type="atom" xmlUrl="https://www.ruanyifeng.com/blog/atom.xml" htmlUrl="https://www.ruanyifeng.com/blog/" />
+      <outline text="少数派" title="少数派" type="rss" xmlUrl="https://sspai.com/feed" htmlUrl="https://sspai.com" />
+      <outline text="Solidot" title="Solidot" type="rss" xmlUrl="https://www.solidot.org/index.rss" htmlUrl="https://www.solidot.org" />
+      <outline text="小众软件" title="小众软件" type="rss" xmlUrl="https://www.appinn.com/feed/" htmlUrl="https://www.appinn.com" />
+    </outline>
+    <outline text="Auto Discovery Pages" title="Auto Discovery Pages">
+      <outline text="GitHub Blog Page" title="GitHub Blog Page" type="rss" xmlUrl="https://github.blog/" htmlUrl="https://github.blog" />
+      <outline text="TechCrunch Page" title="TechCrunch Page" type="rss" xmlUrl="https://techcrunch.com/" htmlUrl="https://techcrunch.com" />
+      <outline text="CSS-Tricks Page" title="CSS-Tricks Page" type="rss" xmlUrl="https://css-tricks.com/" htmlUrl="https://css-tricks.com" />
+      <outline text="Quanta Page" title="Quanta Page" type="rss" xmlUrl="https://www.quantamagazine.org/" htmlUrl="https://www.quantamagazine.org" />
+    </outline>
+  </body>
+</opml>

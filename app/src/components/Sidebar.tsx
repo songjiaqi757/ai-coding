@@ -1,6 +1,6 @@
 import { useEffect, useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Article, Feed, SyncStatus, SyncReport, SyncConfig, AppLanguage } from "../types";
+import type { Article, Feed, SyncStatus, SyncReport, SyncConfig, AppLanguage, OpmlImportReport } from "../types";
 
 const LOCAL_ONLY_FEED_IDS = ["all", "favorites", "read-later", "saved"];
 const SAVED_ARTICLES_FEED_URL = "mercury://internal/captured-articles";
@@ -178,8 +178,28 @@ export function Sidebar({
       setOpmlStatus(isZh ? "正在导入 OPML..." : "Importing OPML...");
       setOpmlError(null);
 
-      const importedFeeds = await invoke<Feed[]>("import_opml", { filePath });
-      setOpmlStatus(isZh ? `已导入 ${importedFeeds.length} 个订阅源` : `Imported ${importedFeeds.length} subscriptions`);
+      const report = await invoke<OpmlImportReport>("import_opml", { filePath });
+      const importedCount = report.importedFeeds.length;
+      const failedCount = report.failedFeeds.length;
+      const firstFailure = report.failedFeeds[0];
+      const successMessage = isZh
+        ? `已导入 ${importedCount} 个订阅源`
+        : `Imported ${importedCount} subscriptions`;
+      const partialMessage =
+        failedCount > 0
+          ? isZh
+            ? `，${failedCount} 个失败${firstFailure ? `：${firstFailure.url} - ${firstFailure.error}` : ""}`
+            : `, ${failedCount} failed${firstFailure ? `: ${firstFailure.url} - ${firstFailure.error}` : ""}`
+          : "";
+
+      const message = `${successMessage}${partialMessage}`;
+      if (importedCount === 0 && failedCount > 0) {
+        setOpmlStatus(null);
+        setOpmlError(message);
+      } else {
+        setOpmlStatus(message);
+        setOpmlError(null);
+      }
       onFeedsChange();
     } catch (error) {
       const message =

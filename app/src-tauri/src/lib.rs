@@ -4,10 +4,13 @@ pub mod sync;
 
 use encoding_rs::Encoding;
 use llm_provider::LlmConfig;
-use reqwest::{header::CONTENT_TYPE, Client, Url};
+use reqwest::{
+    header::{ACCEPT, ACCEPT_ENCODING, CONTENT_TYPE},
+    Client, Url,
+};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -20,6 +23,8 @@ use uuid::Uuid;
 
 const CLEANER_VERSION: &str = "node-readability-v4";
 const FALLBACK_CLEANER_VERSION: &str = "rust-fallback-v1";
+pub(crate) const FEED_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 Mercury/0.1 feed-import";
 pub(crate) const SAVED_ARTICLES_FEED_ID: &str = "saved";
 const SAVED_ARTICLES_FEED_TITLE: &str = "__internal_captured_articles";
 const SAVED_ARTICLES_FEED_URL: &str = "mercury://internal/captured-articles";
@@ -384,9 +389,14 @@ pub async fn import_feed(app: &AppHandle, url: &str) -> Result<Feed, String> {
     })
 }
 
-struct ResolvedFeedImport {
-    feed_url: String,
-    feed: feed_rs::model::Feed,
+pub(crate) struct ResolvedFeedImport {
+    pub(crate) feed_url: String,
+    pub(crate) feed: feed_rs::model::Feed,
+}
+
+struct NormalizedFeedInput {
+    url: String,
+    inferred_https: bool,
 }
 
 struct FeedFetchResponse {
@@ -395,8 +405,9 @@ struct FeedFetchResponse {
     bytes: Vec<u8>,
 }
 
-async fn resolve_feed_import(input_url: &str) -> Result<ResolvedFeedImport, String> {
-    let primary = fetch_feed_resource(input_url).await?;
+pub(crate) async fn resolve_feed_import(input_url: &str) -> Result<ResolvedFeedImport, String> {
+    let normalized = normalize_feed_input_url(input_url)?;
+    let primary = fetch_initial_feed_resource(&normalized).await?;
     if let Ok(feed) = feed_rs::parser::parse(primary.bytes.as_slice()) {
         return Ok(ResolvedFeedImport {
             feed_url: primary.final_url,
@@ -413,7 +424,8 @@ async fn resolve_feed_import(input_url: &str) -> Result<ResolvedFeedImport, Stri
 
     let mut candidates = discover_feed_links_from_html(&primary.final_url, &primary_html);
     candidates.extend(common_feed_candidate_urls(&primary.final_url));
-    candidates.dedup();
+    candidates = unique_urls(candidates);
+    let mut candidate_failures = Vec::new();
 
     for candidate in candidates {
         if tried_urls.iter().any(|tried| urls_match(tried, &candidate)) {
@@ -423,37 +435,137 @@ async fn resolve_feed_import(input_url: &str) -> Result<ResolvedFeedImport, Stri
 
         let fetched = match fetch_feed_resource(&candidate).await {
             Ok(value) => value,
-            Err(_) => continue,
+            Err(error) => {
+                remember_candidate_failure(&mut candidate_failures, &candidate, &error);
+                continue;
+            }
         };
 
-        if let Ok(feed) = feed_rs::parser::parse(fetched.bytes.as_slice()) {
-            return Ok(ResolvedFeedImport {
-                feed_url: fetched.final_url,
-                feed,
-            });
+        match feed_rs::parser::parse(fetched.bytes.as_slice()) {
+            Ok(feed) => {
+                return Ok(ResolvedFeedImport {
+                    feed_url: fetched.final_url,
+                    feed,
+                });
+            }
+            Err(error) => {
+                remember_candidate_failure(
+                    &mut candidate_failures,
+                    &fetched.final_url,
+                    &format!("parse error: {error}"),
+                );
+            }
         }
     }
 
     let tried_summary = tried_urls.join(", ");
+    let failure_summary = candidate_failure_summary(&candidate_failures);
     if looks_like_html_content(primary.content_type.as_deref(), &primary_html) {
         return Err(format!(
-            "This URL looks like a webpage, not a feed. Mercury tried these feed URLs: {}. Original parse error: {}",
-            tried_summary, primary_parse_error
+            "This URL looks like a webpage, not a feed. Mercury tried these feed URLs: {}. Original parse error: {}{}",
+            tried_summary, primary_parse_error, failure_summary
         ));
     }
 
     Err(format!(
-        "Failed to parse RSS/Atom/JSON Feed. Tried: {}. Parse error: {}",
-        tried_summary, primary_parse_error
+        "Failed to parse RSS/Atom/JSON Feed. Tried: {}. Parse error: {}{}",
+        tried_summary, primary_parse_error, failure_summary
     ))
+}
+
+fn remember_candidate_failure(failures: &mut Vec<String>, url: &str, error: &str) {
+    if failures.len() < 5 {
+        failures.push(format!("{url}: {error}"));
+    }
+}
+
+fn candidate_failure_summary(failures: &[String]) -> String {
+    if failures.is_empty() {
+        String::new()
+    } else {
+        format!(". Candidate failures: {}", failures.join("; "))
+    }
+}
+
+fn normalize_feed_input_url(input_url: &str) -> Result<NormalizedFeedInput, String> {
+    let trimmed = input_url.trim();
+    if trimmed.is_empty() {
+        return Err("Feed URL is required".to_string());
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let (candidate, inferred_https) =
+        if lower.starts_with("feed:http://") || lower.starts_with("feed:https://") {
+            (trimmed[5..].to_string(), false)
+        } else if lower.starts_with("feed://") {
+            (format!("https://{}", &trimmed["feed://".len()..]), false)
+        } else if trimmed.starts_with("//") {
+            (format!("https:{trimmed}"), true)
+        } else if has_url_scheme_with_slashes(trimmed) {
+            (trimmed.to_string(), false)
+        } else {
+            (format!("https://{trimmed}"), true)
+        };
+
+    let mut parsed =
+        Url::parse(&candidate).map_err(|error| format!("Invalid feed URL: {error}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("Feed URL must use http:// or https://".to_string());
+    }
+    parsed.set_fragment(None);
+
+    Ok(NormalizedFeedInput {
+        inferred_https: inferred_https && parsed.scheme() == "https",
+        url: parsed.to_string(),
+    })
+}
+
+fn has_url_scheme_with_slashes(value: &str) -> bool {
+    let Some(colon_index) = value.find(':') else {
+        return false;
+    };
+    let first_separator = value
+        .char_indices()
+        .find(|(_, ch)| matches!(ch, '/' | '?' | '#'))
+        .map(|(index, _)| index)
+        .unwrap_or(value.len());
+    colon_index < first_separator && value[after_colon(colon_index)..].starts_with("//")
+}
+
+fn after_colon(colon_index: usize) -> usize {
+    colon_index + ':'.len_utf8()
+}
+
+async fn fetch_initial_feed_resource(
+    normalized: &NormalizedFeedInput,
+) -> Result<FeedFetchResponse, String> {
+    match fetch_feed_resource(&normalized.url).await {
+        Ok(response) => Ok(response),
+        Err(https_error) if normalized.inferred_https => {
+            let http_url = https_to_http_url(&normalized.url)?;
+            fetch_feed_resource(&http_url).await.map_err(|http_error| {
+                format!(
+                    "{https_error}; retried inferred http:// URL and failed: {http_error}"
+                )
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn https_to_http_url(url: &str) -> Result<String, String> {
+    let mut parsed = Url::parse(url).map_err(|error| format!("Invalid feed URL: {error}"))?;
+    parsed
+        .set_scheme("http")
+        .map_err(|_| "Failed to retry feed URL with http://".to_string())?;
+    Ok(parsed.to_string())
 }
 
 async fn fetch_feed_resource(url: &str) -> Result<FeedFetchResponse, String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
-        .http1_only()
-        .user_agent("Mercury/0.1 feed-import")
+        .user_agent(FEED_USER_AGENT)
         .build()
         .map_err(|error| {
             format!(
@@ -462,12 +574,21 @@ async fn fetch_feed_resource(url: &str) -> Result<FeedFetchResponse, String> {
             )
         })?;
 
-    let response = client.get(url).send().await.map_err(|error| {
-        format!(
-            "Failed to request feed URL: {}",
-            reqwest_error_details(&error, url)
+    let response = client
+        .get(url)
+        .header(
+            ACCEPT,
+            "application/rss+xml, application/atom+xml, application/feed+json, application/json;q=0.8, application/xml;q=0.8, text/xml;q=0.8, text/html;q=0.5, */*;q=0.1",
         )
-    })?;
+        .header(ACCEPT_ENCODING, "identity")
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to request feed URL: {}",
+                reqwest_error_details(&error, url)
+            )
+        })?;
 
     if !response.status().is_success() {
         return Err(format!(
@@ -595,16 +716,57 @@ fn discover_feed_links_from_html(base_url: &str, html: &str) -> Vec<String> {
 
 fn extract_html_attr<'a>(tag: &'a str, attr_name: &str) -> Option<&'a str> {
     let lower = tag.to_ascii_lowercase();
-    let needle = format!("{attr_name}=");
-    let start = lower.find(&needle)? + needle.len();
-    let remainder = &tag[start..];
-    let quote = remainder.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
+    let mut search_from = 0usize;
+
+    while let Some(relative_start) = lower[search_from..].find(attr_name) {
+        let attr_start = search_from + relative_start;
+        let after_name = attr_start + attr_name.len();
+        let has_name_prefix = lower[..attr_start]
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+        if has_name_prefix {
+            search_from = after_name;
+            continue;
+        }
+
+        let mut remainder = &tag[after_name..];
+        remainder = remainder.trim_start();
+        if !remainder.starts_with('=') {
+            search_from = after_name;
+            continue;
+        }
+
+        remainder = remainder[1..].trim_start();
+        let quote = remainder.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            return None;
+        }
+        let value = &remainder[1..];
+        let end = value.find(quote)?;
+        return Some(&value[..end]);
     }
-    let value = &remainder[1..];
-    let end = value.find(quote)?;
-    Some(&value[..end])
+
+    None
+}
+
+fn unique_urls(urls: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+
+    for url in urls {
+        let key = Url::parse(&url)
+            .map(|mut parsed| {
+                parsed.set_fragment(None);
+                parsed.to_string()
+            })
+            .unwrap_or_else(|_| url.trim_end_matches('/').to_string());
+        if seen.insert(key) {
+            unique.push(url);
+        }
+    }
+
+    unique
 }
 
 fn common_feed_candidate_urls(base_url: &str) -> Vec<String> {
@@ -613,7 +775,6 @@ fn common_feed_candidate_urls(base_url: &str) -> Vec<String> {
     };
 
     let mut roots = Vec::new();
-    roots.push(parsed.clone());
 
     let mut directory = parsed.clone();
     let path = directory.path().to_string();
@@ -621,9 +782,11 @@ fn common_feed_candidate_urls(base_url: &str) -> Vec<String> {
         let trimmed = path.rsplit_once('/').map(|value| value.0).unwrap_or("");
         directory.set_path(if trimmed.is_empty() { "/" } else { trimmed });
         roots.push(directory.clone());
+    } else {
+        roots.push(parsed.clone());
     }
 
-    if !path.ends_with('/') {
+    if !path.ends_with('/') && !path.ends_with(".html") {
         let mut section = parsed.clone();
         section.set_path(&format!("{}/", path));
         roots.push(section);
@@ -3389,5 +3552,55 @@ mod tests {
 
         assert!(super::looks_like_encoded_html_content(broken));
         assert!(!super::looks_like_encoded_html_content(normal));
+    }
+
+    #[test]
+    fn normalize_feed_input_accepts_common_user_url_forms() {
+        let bare = super::normalize_feed_input_url("github.blog").expect("bare host normalizes");
+        assert_eq!(bare.url, "https://github.blog/");
+        assert!(bare.inferred_https);
+
+        let protocol_relative =
+            super::normalize_feed_input_url("//xkcd.com/atom.xml").expect("protocol-relative normalizes");
+        assert_eq!(protocol_relative.url, "https://xkcd.com/atom.xml");
+        assert!(protocol_relative.inferred_https);
+
+        let feed_scheme =
+            super::normalize_feed_input_url("feed://xkcd.com/atom.xml").expect("feed scheme normalizes");
+        assert_eq!(feed_scheme.url, "https://xkcd.com/atom.xml");
+        assert!(!feed_scheme.inferred_https);
+
+        let prefixed_feed_scheme =
+            super::normalize_feed_input_url("feed:https://xkcd.com/atom.xml").expect("feed prefix strips");
+        assert_eq!(prefixed_feed_scheme.url, "https://xkcd.com/atom.xml");
+        assert!(!prefixed_feed_scheme.inferred_https);
+
+        let localhost =
+            super::normalize_feed_input_url("localhost:3000/feed").expect("localhost port normalizes");
+        assert_eq!(localhost.url, "https://localhost:3000/feed");
+        assert!(localhost.inferred_https);
+    }
+
+    #[test]
+    fn discover_feed_links_handles_spaced_html_attrs() {
+        let html = r#"
+            <html>
+              <head>
+                <link rel = "alternate" type = "application/rss+xml" data-href="/bad.xml" href = "/feed.xml">
+              </head>
+            </html>
+        "#;
+
+        let feeds = super::discover_feed_links_from_html("https://example.com/blog/", html);
+
+        assert_eq!(feeds, vec!["https://example.com/feed.xml".to_string()]);
+    }
+
+    #[test]
+    fn common_feed_candidates_for_html_pages_use_parent_directory() {
+        let candidates = super::common_feed_candidate_urls("https://example.com/blog/post.html");
+
+        assert!(candidates.contains(&"https://example.com/blog/feed.xml".to_string()));
+        assert!(!candidates.contains(&"https://example.com/blog/post.html/feed.xml".to_string()));
     }
 }

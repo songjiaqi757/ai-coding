@@ -1,4 +1,6 @@
-use crate::{open_database, save_articles, SAVED_ARTICLES_FEED_ID};
+use crate::{
+    open_database, resolve_feed_import, save_articles, select_feed_site_url, SAVED_ARTICLES_FEED_ID,
+};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use std::sync::Mutex;
@@ -91,25 +93,30 @@ pub async fn sync_one_feed(app: &AppHandle, feed_id: &str) -> Result<i64, String
         load_feed_target(&conn, feed_id)?
     };
 
-    let response = reqwest::get(&target.url)
-        .await
-        .map_err(|error| format!("Failed to request feed: {error}"))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("Failed to read feed response: {error}"))?;
-    let parsed = feed_rs::parser::parse(bytes.as_ref())
-        .map_err(|error| format!("Failed to parse feed: {error}"))?;
+    let resolved = resolve_feed_import(&target.url).await?;
+    let parsed = resolved.feed;
+    let feed_url = resolved.feed_url;
+    let title = parsed
+        .title
+        .as_ref()
+        .map(|title| title.content.clone())
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| target.title.clone());
+    let site_url = select_feed_site_url(&parsed, None, &feed_url);
 
     let conn = open_database(app)?;
-    let saved = save_articles(&conn, feed_id, &target.url, parsed.entries)? as i64;
+    let saved = save_articles(&conn, feed_id, &feed_url, parsed.entries)? as i64;
     conn.execute(
         "UPDATE feeds
-         SET last_sync_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?1",
-        params![feed_id],
+         SET title = ?1,
+             url = ?2,
+             site_url = ?3,
+             last_sync_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?4",
+        params![title, feed_url, site_url, feed_id],
     )
-    .map_err(|error| format!("Failed to update sync time: {error}"))?;
+    .map_err(|error| format!("Failed to update feed after sync: {error}"))?;
     clear_sync_failure(&conn, feed_id)?;
 
     Ok(saved)

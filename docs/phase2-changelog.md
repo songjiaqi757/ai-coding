@@ -120,8 +120,8 @@ invoke<Feed[]>("list_feeds")
 // 列出文章：feedId 为 null 返回全部，传 Feed ID 只返回该源的文章
 invoke<Article[]>("list_articles", { feedId: string | null })
 
-// OPML 导入：弹出文件选择框，解析 OPML，批量添加 Feed
-invoke<Feed[]>("import_opml", { filePath: string })
+// OPML 导入：弹出文件选择框，解析 OPML，批量添加 Feed，并返回成功/失败明细
+invoke<OpmlImportReport>("import_opml", { filePath: string })
 ```
 
 ---
