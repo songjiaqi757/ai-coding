@@ -47,7 +47,7 @@ type HighlightStyle = "background" | "text" | "underline";
 const SMART_FAVORITES = "favorites";
 const SMART_READ_LATER = "read-later";
 const SAVED_ARTICLES_FEED_ID = "saved";
-const SAVED_ARTICLES_FEED_URL = "mercury://internal/captured-articles";
+const SAVED_ARTICLES_FEED_URL = "bookibuddy://internal/captured-articles";
 const HIGHLIGHT_COLORS = ["#ffd400", "#ff5f67", "#58b83d", "#33a6d8", "#9b7de3", "#d85be9", "#f59a32", "#a3a3a3"];
 const DEFAULT_HIGHLIGHT_COLOR = HIGHLIGHT_COLORS[0];
 const DEFAULT_HIGHLIGHT_STYLE: HighlightStyle = "background";
@@ -1654,7 +1654,6 @@ function App() {
         onClearSearch={resetSearch}
         onPreviousSearchMatch={() => focusSearchMatch(searchMatchIndex - 1)}
         onNextSearchMatch={() => focusSearchMatch(searchMatchIndex + 1)}
-        onToggleReadStatus={handleToggleReadStatus}
         onToggleFavorite={toggleFavorite}
         onMarkCurrentFeedRead={handleMarkCurrentFeedRead}
         highlightText={(text) => highlightText(text, activeSearchQuery)}

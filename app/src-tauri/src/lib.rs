@@ -24,10 +24,10 @@ use uuid::Uuid;
 const CLEANER_VERSION: &str = "node-readability-v4";
 const FALLBACK_CLEANER_VERSION: &str = "rust-fallback-v1";
 pub(crate) const FEED_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 Mercury/0.1 feed-import";
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 BookiBuddy/0.1 feed-import";
 pub(crate) const SAVED_ARTICLES_FEED_ID: &str = "saved";
 const SAVED_ARTICLES_FEED_TITLE: &str = "__internal_captured_articles";
-const SAVED_ARTICLES_FEED_URL: &str = "mercury://internal/captured-articles";
+const SAVED_ARTICLES_FEED_URL: &str = "bookibuddy://internal/captured-articles";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,7 +147,7 @@ fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     fs::create_dir_all(&app_data_dir)
         .map_err(|error| format!("Failed to create app data dir: {error}"))?;
 
-    Ok(app_data_dir.join("mercury.db"))
+    Ok(app_data_dir.join("bookibuddy.db"))
 }
 
 pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
@@ -462,7 +462,7 @@ pub(crate) async fn resolve_feed_import(input_url: &str) -> Result<ResolvedFeedI
     let failure_summary = candidate_failure_summary(&candidate_failures);
     if looks_like_html_content(primary.content_type.as_deref(), &primary_html) {
         return Err(format!(
-            "This URL looks like a webpage, not a feed. Mercury tried these feed URLs: {}. Original parse error: {}{}",
+            "This URL looks like a webpage, not a feed. BookiBuddy tried these feed URLs: {}. Original parse error: {}{}",
             tried_summary, primary_parse_error, failure_summary
         ));
     }

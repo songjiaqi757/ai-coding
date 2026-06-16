@@ -2,7 +2,7 @@
 
 ## Project Name
 
-Mercury - AI Reader
+BookiBuddy - AI Reader
 
 ## Project Goal
 

@@ -53,17 +53,15 @@ button {
   gap: 12px;
 }
 
-.brand-mark {
-  display: grid;
-  width: 44px;
-  height: 44px;
-  place-items: center;
-  border-radius: 14px;
-  color: white;
-  font-size: 22px;
-  font-weight: 800;
-  background: #1f6feb;
-  box-shadow: 0 8px 24px rgb(31 111 235 / 25%);
+.brand-logo {
+  display: block;
+  width: 74px;
+  height: 74px;
+  flex-shrink: 0;
+}
+
+.brand-copy {
+  min-width: 0;
 }
 
 .brand h1,
@@ -73,8 +71,8 @@ button {
 }
 
 .brand h1 {
-  font-size: 22px;
-  letter-spacing: -0.04em;
+  font-size: 24px;
+  letter-spacing: 0;
 }
 
 .brand p,
@@ -452,20 +450,6 @@ button {
   font-weight: 800;
 }
 
-.read-state {
-  flex-shrink: 0;
-  white-space: nowrap;
-  border-radius: 999px;
-  padding: 2px 7px;
-  background: #e2e8f0;
-  color: #64748b;
-}
-
-.read-state.unread {
-  background: #dbeafe;
-  color: #1d4ed8;
-}
-
 .article-meta {
   display: flex;
   gap: 10px;
@@ -476,64 +460,38 @@ button {
   font-weight: 600;
 }
 
-.article-meta span:not(.read-state) {
+.article-meta span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.article-card-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.article-card-unread-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-top: 18px;
+  border-radius: 999px;
+  background: #2563eb;
+  box-shadow: 0 0 0 4px rgb(37 99 235 / 12%);
+}
+
 .article-card-title {
   display: block;
   margin: 10px 0 4px;
+  min-width: 0;
   overflow-wrap: anywhere;
   font-size: 17px;
   line-height: 1.35;
   letter-spacing: -0.02em;
   font-weight: 700;
-}
-
-.article-card-excerpt {
-  display: -webkit-box;
-  margin: 0;
-  color: #64748b;
-  font-size: 14px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 5;
-}
-
-.read-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  padding: 6px 11px;
-  border: 1px solid #c9d8ee;
-  border-radius: 999px;
-  background: #f8fbff;
-  color: #35558b;
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s, color 0.15s;
-}
-
-.read-toggle svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.read-toggle:hover {
-  background: #eef5ff;
-  border-color: #9ebceb;
-  box-shadow: 0 0 0 3px rgb(59 130 246 / 10%);
 }
 
 .marking-icon-button {
@@ -577,20 +535,9 @@ button {
   fill: currentColor;
 }
 
-.read-toggle:focus-visible {
-  outline: 2px solid #1f6feb;
-  outline-offset: 2px;
-}
-
-.article-card.read .read-toggle {
-  border-color: #d9e1ea;
-  background: #f8fafc;
-  color: #526173;
-}
-
-.article-card.read .read-toggle:hover {
-  background: #f1f5f9;
-  border-color: #bdc9d6;
+.article-card.read .article-card-title {
+  color: #94a3b8;
+  font-weight: 600;
 }
 
 .reader {

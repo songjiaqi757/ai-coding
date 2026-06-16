@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS articles (
 ```
 
 > **注意**：schema 改动后旧的本地数据库会不兼容。开发期间直接删除旧数据库文件重新初始化即可。
-> 数据库文件路径：`%APPDATA%/com.songjiaqi757.mercury/mercury.db`（Windows）
+> 数据库文件路径：`%APPDATA%/com.songjiaqi757.bookibuddy/bookibuddy.db`（Windows）
 
 ---
 
@@ -714,7 +714,7 @@ export function Sidebar({ feeds, selectedFeedId, onSelectFeed, onFeedsChange }: 
       <div className="brand">
         <div className="brand-mark">M</div>
         <div>
-          <h1>Mercury</h1>
+          <h1>BookiBuddy</h1>
           <p>AI Reader</p>
         </div>
       </div>
@@ -1231,7 +1231,7 @@ pub fn save_articles(conn: &Connection, feed_id: &str, entries: Vec<feed_rs::mod
 <?xml version="1.0" encoding="UTF-8"?>
 <opml version="2.0">
   <head>
-    <title>Mercury Test Feeds</title>
+    <title>BookiBuddy Test Feeds</title>
   </head>
   <body>
     <outline text="技术" title="技术">

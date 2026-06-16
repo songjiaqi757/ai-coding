@@ -67,8 +67,8 @@ jobs:
         with:
           projectPath: app
           tagName: v__VERSION__
-          releaseName: "Mercury v__VERSION__"
-          releaseBody: "Internal release build for Mercury. Download the desktop assets for macOS, Windows, and Linux below."
+          releaseName: "BookiBuddy v__VERSION__"
+          releaseBody: "Internal release build for BookiBuddy. Download the desktop assets for macOS, Windows, and Linux below."
           releaseDraft: false
           prerelease: true
           includeUpdaterJson: false

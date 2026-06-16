@@ -1,0 +1,39 @@
+<svg width="760" height="280" viewBox="0 0 760 280" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="760" height="280" rx="36" fill="#FFFFFF"/>
+  <g transform="translate(24 12)">
+    <ellipse cx="128" cy="180" rx="102" ry="29" fill="#A9D8FF"/>
+    <path d="M69 56c10-12 26-17 39-8 11 7 17 19 18 34-14-2-27-7-38-17-9-9-16-9-19-9Z" fill="#FF7A1A"/>
+    <path d="M58 62c4-10 14-16 25-16 20 0 36 16 36 36 0 2 0 4-1 5-12-3-24-9-33-19-10-9-21-7-27-6Z" stroke="#D94C19" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M186 56c-10-12-26-17-39-8-11 7-17 19-18 34 14-2 27-7 38-17 9-9 16-9 19-9Z" fill="#FF7A1A"/>
+    <path d="M197 62c-4-10-14-16-25-16-20 0-36 16-36 36 0 2 0 4 1 5 12-3 24-9 33-19 10-9 21-7 27-6Z" stroke="#D94C19" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="37" y="64" width="182" height="154" rx="30" fill="#46536E"/>
+    <rect x="47" y="74" width="162" height="136" rx="24" fill="#727D90"/>
+    <rect x="64" y="92" width="128" height="102" rx="16" fill="#FFFDF6"/>
+    <circle cx="94" cy="135" r="16" fill="#1F2A44"/>
+    <circle cx="162" cy="135" r="16" fill="#1F2A44"/>
+    <circle cx="89" cy="129" r="5" fill="white"/>
+    <circle cx="157" cy="129" r="5" fill="white"/>
+    <path d="M109 157c7 9 14 13 19 13 6 0 12-4 19-13" stroke="#1F2A44" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="78" cy="159" r="6" fill="#FFC9C9"/>
+    <circle cx="178" cy="159" r="6" fill="#FFC9C9"/>
+    <rect x="49" y="125" width="7" height="28" rx="3.5" fill="#2E3952"/>
+    <rect x="197" y="113" width="10" height="50" rx="5" fill="#5E687D"/>
+    <rect x="61" y="171" width="36" height="54" rx="16" fill="#5B677E"/>
+    <rect x="159" y="171" width="36" height="54" rx="16" fill="#5B677E"/>
+    <path d="M56 204c6-14 22-22 36-18l41 15-23 31-44-11c-12-3-16-10-10-17Z" fill="#FF6812"/>
+    <path d="M200 204c-6-14-22-22-36-18l-41 15 23 31 44-11c12-3 16-10 10-17Z" fill="#FF6812"/>
+    <path d="M77 179c22 0 39 8 51 19 12-11 29-19 51-19 11 0 24 2 35 6v58c-12-6-26-9-40-9-19 0-35 6-46 17-11-11-27-17-46-17-14 0-28 3-40 9v-58c11-4 24-6 35-6Z" fill="#FF6A16"/>
+    <path d="M128 198v52" stroke="#D94C19" stroke-width="6" stroke-linecap="round"/>
+    <circle cx="18" cy="117" r="8" fill="#FFC44D"/>
+    <path d="M18 104v9M18 121v9M5 117h9M22 117h9" stroke="#FFB11A" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="238" cy="123" r="8" fill="#FFC44D"/>
+    <path d="M238 110v9M238 127v9M225 123h9M242 123h9" stroke="#FFB11A" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <g transform="translate(270 78)">
+    <text x="0" y="84" font-family="Inter, Arial, sans-serif" font-size="84" font-weight="800" letter-spacing="0" fill="#FF6812">Booki</text>
+    <text x="222" y="84" font-family="Inter, Arial, sans-serif" font-size="84" font-weight="800" letter-spacing="0" fill="#2F8FEA">Buddy</text>
+    <path d="M0 142h74" stroke="#6D7E97" stroke-width="4" stroke-linecap="round"/>
+    <path d="M352 142h74" stroke="#6D7E97" stroke-width="4" stroke-linecap="round"/>
+    <text x="90" y="154" font-family="Inter, Arial, sans-serif" font-size="44" font-weight="600" letter-spacing="0" fill="#1C2432">Your Reading Pal!</text>
+  </g>
+</svg>

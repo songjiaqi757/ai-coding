@@ -26,7 +26,7 @@ Phase 2 把它变成了一个**能真正工作的 RSS 阅读器**：
 
 Phase 2 对 SQLite 表结构做了**不兼容的改动**。如果你本地有 Phase 1 的旧数据库，需要删掉让它重新初始化。
 
-数据库文件位置：`%APPDATA%/com.songjiaqi757.mercury/mercury.db`（Windows）
+数据库文件位置：`%APPDATA%/com.songjiaqi757.bookibuddy/bookibuddy.db`（Windows）
 
 ### feeds 表
 

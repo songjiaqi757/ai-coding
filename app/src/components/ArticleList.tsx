@@ -25,7 +25,6 @@ type Props = {
   onClearSearch: () => void;
   onPreviousSearchMatch: () => void;
   onNextSearchMatch: () => void;
-  onToggleReadStatus: (article: Article) => void;
   onToggleFavorite: (article: Article) => void;
   onMarkCurrentFeedRead: () => void;
   highlightText: (text: string) => ReactNode;
@@ -53,7 +52,6 @@ export function ArticleList({
   onClearSearch,
   onPreviousSearchMatch,
   onNextSearchMatch,
-  onToggleReadStatus,
   onToggleFavorite,
   onMarkCurrentFeedRead,
   highlightText,
@@ -172,7 +170,6 @@ export function ArticleList({
           >
             <div className="article-card-header">
               <span className="article-meta">
-                {!article.isRead && <span className="read-state unread">{isZh ? "未读" : "Unread"}</span>}
                 <span>
                   {article.publishedAt
                     ? new Date(article.publishedAt).toLocaleDateString("zh-CN")
@@ -194,25 +191,6 @@ export function ArticleList({
                     <path d="m12 3.3 2.68 5.43 5.99.87-4.34 4.23 1.03 5.97L12 17l-5.36 2.8 1.03-5.97L3.33 9.6l5.99-.87L12 3.3Z" />
                   </svg>
                 </button>
-                <button
-                  type="button"
-                  className="read-toggle"
-                  aria-label={article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}
-                  title={article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onToggleReadStatus(article);
-                  }}
-                >
-                  <svg aria-hidden="true" viewBox="0 0 20 20">
-                    {article.isRead ? (
-                      <path d="M6.5 6.5h7v7m0-7-7 7" />
-                    ) : (
-                      <path d="m5 10 3.2 3.2L15 6.5" />
-                    )}
-                  </svg>
-                  <span>{article.isRead ? (isZh ? "设为未读" : "Mark unread") : isZh ? "标为已读" : "Mark read"}</span>
-                </button>
               </div>
             </div>
             <button
@@ -220,7 +198,10 @@ export function ArticleList({
               className="article-card-main"
               onClick={() => onSelectArticle(article.id)}
             >
-              <span className="article-card-title">{highlightText(article.title)}</span>
+              <span className="article-card-title-row">
+                {!article.isRead && <span className="article-card-unread-dot" aria-hidden="true" />}
+                <span className="article-card-title">{highlightText(article.title)}</span>
+              </span>
             </button>
           </article>
         ))}

@@ -147,7 +147,7 @@ fn list_export_feeds(conn: &rusqlite::Connection) -> Result<Vec<ExportFeed>, Str
 pub fn build_opml_xml(feeds: &[ExportFeed]) -> Result<String, String> {
     let mut document = OPML::default();
     document.head = Some(Head {
-        title: Some("Mercury subscriptions".to_string()),
+        title: Some("BookiBuddy subscriptions".to_string()),
         docs: Some("http://opml.org/spec2.opml".to_string()),
         ..Head::default()
     });

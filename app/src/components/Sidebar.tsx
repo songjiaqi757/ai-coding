@@ -1,9 +1,10 @@
 import { useEffect, useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Article, Feed, SyncStatus, SyncReport, SyncConfig, AppLanguage, OpmlImportReport } from "../types";
+import bookiBuddyLogo from "../assets/bookibuddy-logo.svg";
 
 const LOCAL_ONLY_FEED_IDS = ["all", "favorites", "read-later", "saved"];
-const SAVED_ARTICLES_FEED_URL = "mercury://internal/captured-articles";
+const SAVED_ARTICLES_FEED_URL = "bookibuddy://internal/captured-articles";
 
 type Props = {
   feeds: Feed[];
@@ -219,7 +220,7 @@ export function Sidebar({
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const filePath = await save({
-        defaultPath: "mercury-subscriptions.opml",
+        defaultPath: "bookibuddy-subscriptions.opml",
         filters: [{ name: "OPML", extensions: ["opml", "xml"] }],
       });
       if (!filePath) return;
@@ -265,10 +266,10 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand-mark">M</div>
-        <div>
-          <h1>Mercury</h1>
-          <p>{isZh ? "AI 阅读器" : "AI Reader"}</p>
+        <img className="brand-logo" src={bookiBuddyLogo} alt="BookiBuddy" />
+        <div className="brand-copy">
+          <h1>BookiBuddy</h1>
+          <p>{isZh ? "Your Reading Pal!" : "Your Reading Pal!"}</p>
         </div>
       </div>
 
