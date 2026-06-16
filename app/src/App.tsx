@@ -686,6 +686,8 @@ function App() {
         translationBaseUrl,
         translationApiKey,
         translationModelName,
+        savedSummaryTargetLang,
+        savedTranslationTargetLang,
         savedLanguage,
       ] = await Promise.all([
         invoke<string | null>("load_setting", { key: "llm_base_url" }),
@@ -697,6 +699,8 @@ function App() {
         invoke<string | null>("load_setting", { key: "llm_translation_base_url" }),
         invoke<string | null>("load_setting", { key: "llm_translation_api_key" }),
         invoke<string | null>("load_setting", { key: "llm_translation_model_name" }),
+        invoke<string | null>("load_setting", { key: "llm_summary_target_lang" }),
+        invoke<string | null>("load_setting", { key: "llm_translation_target_lang" }),
         invoke<AppLanguage | null>("load_setting", { key: "app_language" }),
       ]);
       setSettingsForm({
@@ -707,6 +711,13 @@ function App() {
         translationApiKey: translationApiKey ?? legacyApiKey ?? "",
         translationModelName: translationModelName ?? legacyModelName ?? "",
       });
+      if (savedSummaryTargetLang) {
+        setSummaryLang(savedSummaryTargetLang);
+        isSummaryLangPinnedRef.current = true;
+      }
+      if (savedTranslationTargetLang) {
+        setTargetLang(savedTranslationTargetLang);
+      }
       setSettingsLanguage(savedLanguage === "en" ? "en" : "zh");
     } catch {
       // Settings not configured yet
@@ -732,6 +743,8 @@ function App() {
         invoke("save_setting", { key: "llm_translation_base_url", value: settingsForm.translationBaseUrl }),
         invoke("save_setting", { key: "llm_translation_api_key", value: settingsForm.translationApiKey }),
         invoke("save_setting", { key: "llm_translation_model_name", value: settingsForm.translationModelName }),
+        invoke("save_setting", { key: "llm_summary_target_lang", value: summaryLang }),
+        invoke("save_setting", { key: "llm_translation_target_lang", value: targetLang }),
         invoke("save_setting", { key: "app_language", value: settingsLanguage }),
       ]);
       setAppLanguage(settingsLanguage);
@@ -2025,20 +2038,6 @@ function App() {
                 <div className="ai-result-header">
                   <div className="ai-result-label">{isZh ? "摘要" : "Summary"}</div>
                   <div className="ai-result-actions">
-                    <select
-                      className="summary-lang-select"
-                      value={summaryLang}
-                      onChange={(event) => {
-                        const nextLang = event.target.value;
-                        isSummaryLangPinnedRef.current = true;
-                        setSummaryLang(nextLang);
-                      }}
-                    >
-                      <option value="zh">{isZh ? "中文" : "Chinese"}</option>
-                      <option value="en">{isZh ? "英文" : "English"}</option>
-                      <option value="ja">{isZh ? "日文" : "Japanese"}</option>
-                      <option value="ko">{isZh ? "韩文" : "Korean"}</option>
-                    </select>
                     <button
                       type="button"
                       className={isCurrentSummaryRunning ? "summary-generate-button action-loading" : "summary-generate-button"}
@@ -2058,7 +2057,7 @@ function App() {
                     ? activeSummary
                     : isCurrentSummaryRunning
                       ? (isZh ? "正在生成该语言的摘要..." : "Generating summary in this language...")
-                      : (isZh ? "先选择语言，再点击“生成摘要”。" : "Choose a language, then click Generate.")}
+                      : (isZh ? "请在设置中选择摘要语言后，再点击“生成摘要”。" : "Choose the summary language in Settings, then click Generate.")}
                 </div>
               </div>
             )}
@@ -2375,6 +2374,29 @@ function App() {
                     value={settingsForm.translationModelName}
                     onChange={(e) => setSettingsForm((f) => ({ ...f, translationModelName: e.target.value }))}
                   />
+                </label>
+              </section>
+
+              <section className="settings-section">
+                <div className="settings-section-heading">
+                  <strong>{isZh ? "摘要" : "Summary"}</strong>
+                  <span>{isZh ? "设置“摘要”操作默认使用的目标语言。" : "Choose the default target language used by the Summary action."}</span>
+                </div>
+                <label>
+                  {isZh ? "目标语言" : "Target Language"}
+                  <select
+                    className="settings-select"
+                    value={summaryLang}
+                    onChange={(e) => {
+                      isSummaryLangPinnedRef.current = true;
+                      setSummaryLang(e.target.value);
+                    }}
+                  >
+                    <option value="zh">{isZh ? "中文" : "Chinese"}</option>
+                    <option value="en">{isZh ? "英文" : "English"}</option>
+                    <option value="ja">{isZh ? "日文" : "Japanese"}</option>
+                    <option value="ko">{isZh ? "韩文" : "Korean"}</option>
+                  </select>
                 </label>
               </section>
 
