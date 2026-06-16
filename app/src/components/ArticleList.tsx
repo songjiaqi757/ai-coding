@@ -1,7 +1,5 @@
-import type { FormEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { Article, ReadFilter, AppLanguage } from "../types";
-
-type SearchScope = "all" | "feed";
 
 type Props = {
   articles: Article[];
@@ -12,19 +10,9 @@ type Props = {
   selectedArticleId: string | null;
   isLoading: boolean;
   readFilter: ReadFilter;
-  searchQuery: string;
-  searchScope: SearchScope;
-  activeSearchQuery: string;
-  searchMatchLabel: string | null;
   isUpdatingReadStatus: boolean;
   onSelectArticle: (id: string) => void;
   onReadFilterChange: (filter: ReadFilter) => void;
-  onSearchQueryChange: (query: string) => void;
-  onSearchScopeChange: (scope: SearchScope) => void;
-  onSearch: (event?: FormEvent<HTMLFormElement>) => void;
-  onClearSearch: () => void;
-  onPreviousSearchMatch: () => void;
-  onNextSearchMatch: () => void;
   onToggleFavorite: (article: Article) => void;
   onMarkCurrentFeedRead: () => void;
   highlightText: (text: string) => ReactNode;
@@ -39,33 +27,17 @@ export function ArticleList({
   selectedArticleId,
   isLoading,
   readFilter,
-  searchQuery,
-  searchScope,
-  activeSearchQuery,
-  searchMatchLabel,
   isUpdatingReadStatus,
   onSelectArticle,
   onReadFilterChange,
-  onSearchQueryChange,
-  onSearchScopeChange,
-  onSearch,
-  onClearSearch,
-  onPreviousSearchMatch,
-  onNextSearchMatch,
   onToggleFavorite,
   onMarkCurrentFeedRead,
   highlightText,
 }: Props) {
   const isZh = appLanguage === "zh";
-  const currentFilterCount =
-    readFilter === "all" ? totalCount : readFilter === "unread" ? unreadCount : readCount;
   const countLabel = isLoading
     ? isZh ? "加载中..." : "Loading..."
-    : searchQuery.trim()
-      ? isZh
-        ? `当前 ${articles.length} 篇，筛选范围 ${currentFilterCount} 篇，未读 ${unreadCount} 篇`
-        : `${articles.length} current, ${currentFilterCount} in scope, ${unreadCount} unread`
-      : readFilter === "all"
+    : readFilter === "all"
         ? isZh ? `共 ${totalCount} 篇，未读 ${unreadCount} 篇` : `${totalCount} total, ${unreadCount} unread`
         : readFilter === "unread"
           ? isZh ? `未读 ${unreadCount} 篇` : `${unreadCount} unread`
@@ -104,50 +76,6 @@ export function ArticleList({
           </button>
         ))}
       </div>
-
-      <form className="article-search" onSubmit={(event) => onSearch(event)}>
-        <div className="search-input-shell">
-          <input
-            value={searchQuery}
-            onChange={(event) => {
-              const value = event.target.value;
-              onSearchQueryChange(value);
-              if (!value.trim()) onClearSearch();
-            }}
-            placeholder={isZh ? "搜索文章和批注..." : "Search articles and notes..."}
-          />
-          {searchQuery && (
-            <button
-              className="search-clear-button"
-              type="button"
-              aria-label={isZh ? "清空搜索" : "Clear search"}
-              onClick={onClearSearch}
-            >
-              <span className="search-clear-icon" aria-hidden="true" />
-            </button>
-          )}
-        </div>
-        <select
-          value={searchScope}
-          onChange={(event) => onSearchScopeChange(event.target.value as SearchScope)}
-        >
-          <option value="all">{isZh ? "全部文章" : "All articles"}</option>
-          <option value="feed">{isZh ? "当前订阅源" : "Current feed"}</option>
-        </select>
-        <button type="submit">{isZh ? "搜索" : "Search"}</button>
-      </form>
-
-      {activeSearchQuery && (
-        <div className="search-navigation">
-          <button type="button" disabled={searchMatchLabel === "0 / 0"} onClick={onPreviousSearchMatch}>
-            {isZh ? "上一个" : "Previous"}
-          </button>
-          <span>{searchMatchLabel}</span>
-          <button type="button" disabled={searchMatchLabel === "0 / 0"} onClick={onNextSearchMatch}>
-            {isZh ? "下一个" : "Next"}
-          </button>
-        </div>
-      )}
 
       <div className="cards">
         {articles.length === 0 && !isLoading && (

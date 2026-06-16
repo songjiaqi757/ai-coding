@@ -307,13 +307,15 @@ button {
 }
 
 .search-box,
-.article-search {
+.article-search,
+.sidebar-search {
   margin-bottom: 16px;
 }
 
-.article-search {
+.article-search,
+.sidebar-search {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
 }
 
@@ -324,7 +326,7 @@ button {
 
 .search-box input,
 .article-search input,
-.article-search select {
+.sidebar-search input {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid #d0d7e2;
@@ -333,13 +335,10 @@ button {
   background: white;
 }
 
-.article-search select {
-  min-width: 108px;
-  color: #475569;
-}
-
 .article-search button,
-.search-navigation button {
+.sidebar-search button,
+.search-navigation button,
+.reader-search-actions button {
   padding: 9px 12px;
   border: 1px solid #d0d7e2;
   border-radius: 12px;
@@ -350,7 +349,7 @@ button {
 
 .search-box input:focus,
 .article-search input:focus,
-.article-search select:focus {
+.sidebar-search input:focus {
   border-color: #1f6feb;
   box-shadow: 0 0 0 3px rgb(31 111 235 / 12%);
 }
@@ -378,6 +377,10 @@ button {
   border-radius: 0;
   background: transparent;
   box-shadow: none;
+}
+
+.sidebar-search-button {
+  white-space: nowrap;
 }
 
 .search-clear-button:hover {
@@ -1550,6 +1553,50 @@ button {
   border-left: 4px solid #10b981;
   border-radius: 0 12px 12px 0;
   background: #ecfdf5;
+}
+
+.reader-search-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 0 42px 18px;
+  padding: 14px 16px;
+  border: 1px solid #dbe5f1;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+
+.reader-search-panel .search-input-shell {
+  flex: 1;
+}
+
+.reader-search-panel input {
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid #d0d7e2;
+  border-radius: 12px;
+  outline: none;
+  background: white;
+}
+
+.reader-search-panel input:focus {
+  border-color: #1f6feb;
+  box-shadow: 0 0 0 3px rgb(31 111 235 / 12%);
+}
+
+.reader-search-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.reader-search-actions span {
+  min-width: 52px;
+  color: #64748b;
+  font-size: 13px;
+  text-align: center;
 }
 
 .ai-result-header {

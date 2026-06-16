@@ -41,7 +41,6 @@ type PendingTextSelection = {
   startOffset: number;
   endOffset: number;
 };
-type SearchScope = "all" | "feed";
 type HighlightStyle = "background" | "text" | "underline";
 type ColumnResizeTarget = "sidebar" | "articles";
 
@@ -299,16 +298,6 @@ function splitTranslationBlocks(translation: string): string[] {
     .filter(Boolean);
 }
 
-function textMatchesQuery(text: string | null | undefined, query: string) {
-  return Boolean(query.trim() && text?.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-}
-
-function countQueryMatches(text: string | null | undefined, query: string) {
-  const normalizedQuery = query.trim();
-  if (!text || !normalizedQuery) return 0;
-  return Array.from(text.matchAll(new RegExp(escapedPattern(normalizedQuery), "gi"))).length;
-}
-
 function leadingWhitespaceLength(value: string) {
   return value.length - value.trimStart().length;
 }
@@ -462,10 +451,11 @@ function App() {
   const [readerHistory, setReaderHistory] = useState<ReaderSnapshot[]>([]);
   const [readerForwardHistory, setReaderForwardHistory] = useState<ReaderSnapshot[]>([]);
   const [readFilter, setReadFilter] = useState<ReadFilter>("all");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchScope, setSearchScope] = useState<SearchScope>("all");
-  const [activeSearchQuery, setActiveSearchQuery] = useState("");
-  const [searchMatchIndex, setSearchMatchIndex] = useState(0);
+  const [librarySearchQuery, setLibrarySearchQuery] = useState("");
+  const [activeLibrarySearchQuery, setActiveLibrarySearchQuery] = useState("");
+  const [readerSearchQuery, setReaderSearchQuery] = useState("");
+  const [activeReaderSearchQuery, setActiveReaderSearchQuery] = useState("");
+  const [readerSearchMatchIndex, setReaderSearchMatchIndex] = useState(0);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [isAnnotationDrawerOpen, setIsAnnotationDrawerOpen] = useState(false);
   const [newNoteDraft, setNewNoteDraft] = useState<string | null>(null);
@@ -500,6 +490,7 @@ function App() {
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [isSummaryPanelOpen, setIsSummaryPanelOpen] = useState(false);
+  const [isReaderSearchOpen, setIsReaderSearchOpen] = useState(false);
   const [summaryJob, setSummaryJob] = useState<AiJobStatus | null>(null);
   const [translationJob, setTranslationJob] = useState<AiJobStatus | null>(null);
   const [selectionOverlay, setSelectionOverlay] = useState<SelectionOverlay | null>(null);
@@ -511,6 +502,7 @@ function App() {
   const [summaryLang, setSummaryLang] = useState("zh");
   const [summaryCache, setSummaryCache] = useState<Record<string, Record<string, string>>>({});
   const isSummaryLangPinnedRef = useRef(false);
+  const readerSearchInputRef = useRef<HTMLInputElement | null>(null);
 
   // Sync status
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
@@ -564,8 +556,7 @@ function App() {
       setFeeds(nextFeeds.filter((f) => !isSavedArticlesFeed(f)));
       setArticles(nextArticles);
       setSearchResults(null);
-      setActiveSearchQuery("");
-      setSearchMatchIndex(0);
+      setActiveLibrarySearchQuery("");
       setAllArticleCount(allArticles.length);
       setAllUnreadCount(allArticles.filter((article) => !article.isRead).length);
       setFavoriteCount(allArticles.filter((article) => article.isFavorite).length);
@@ -730,6 +721,26 @@ function App() {
       void loadSettings();
     }
   }, [showSettings, loadSettings]);
+
+  useEffect(() => {
+    function handleGlobalKeydown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
+        if (readerPdfUrl || readerOriginalUrl || !selectedArticle) return;
+        event.preventDefault();
+        openReaderSearch();
+        return;
+      }
+
+      if (event.key === "Escape" && isReaderSearchOpen) {
+        event.preventDefault();
+        setIsReaderSearchOpen(false);
+        resetReaderSearch();
+      }
+    }
+
+    window.addEventListener("keydown", handleGlobalKeydown);
+    return () => window.removeEventListener("keydown", handleGlobalKeydown);
+  }, [isReaderSearchOpen, readerOriginalUrl, readerPdfUrl, selectedArticleId]);
 
   async function handleSaveSettings() {
     try {
@@ -902,32 +913,43 @@ function App() {
   }
 
   function resetSearch() {
-    setSearchQuery("");
-    setSearchScope("all");
+    setLibrarySearchQuery("");
     setSearchResults(null);
-    setActiveSearchQuery("");
-    setSearchMatchIndex(0);
+    setActiveLibrarySearchQuery("");
   }
 
   async function runSearch(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    const query = searchQuery.trim();
+    const query = librarySearchQuery.trim();
     if (!query) {
       resetSearch();
       return;
     }
-    const feedId =
-      searchScope === "feed" && !["all", SMART_FAVORITES, SMART_READ_LATER].includes(selectedFeedId)
-        ? selectedFeedId
-        : null;
     try {
       setErrorMessage(null);
-      setSearchResults(await invoke<Article[]>("search_articles", { query, feedId }));
-      setActiveSearchQuery(query);
-      setSearchMatchIndex(0);
+      setSearchResults(await invoke<Article[]>("search_articles", { query, feedId: null }));
+      setActiveLibrarySearchQuery(query);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  function resetReaderSearch() {
+    setReaderSearchQuery("");
+    setActiveReaderSearchQuery("");
+    setReaderSearchMatchIndex(0);
+    document.querySelectorAll(".current-search-match").forEach((item) => {
+      item.classList.remove("current-search-match");
+    });
+  }
+
+  function openReaderSearch() {
+    if (readerPdfUrl || readerOriginalUrl || !selectedArticle) return;
+    setIsReaderSearchOpen(true);
+    window.requestAnimationFrame(() => {
+      readerSearchInputRef.current?.focus();
+      readerSearchInputRef.current?.select();
+    });
   }
 
   async function toggleFavorite(article: Article) {
@@ -945,11 +967,13 @@ function App() {
 
   const visibleArticles = useMemo(() => {
     const source = searchResults ?? articles;
-    const smartMatchedArticles = source.filter((article) => {
-      if (selectedFeedId === SMART_FAVORITES) return article.isFavorite;
-      if (selectedFeedId === SMART_READ_LATER) return article.readLater;
-      return true;
-    });
+    const smartMatchedArticles = searchResults
+      ? source
+      : source.filter((article) => {
+          if (selectedFeedId === SMART_FAVORITES) return article.isFavorite;
+          if (selectedFeedId === SMART_READ_LATER) return article.readLater;
+          return true;
+        });
 
     const filterMatchedArticles = smartMatchedArticles.filter((article) => {
       if (readFilter === "all") return true;
@@ -998,27 +1022,19 @@ function App() {
         : selectedArticle.excerpt.trim()
           ? `<p>${escapeHtml(selectedArticle.excerpt)}</p>`
           : `<p>${isZh ? "暂无可显示内容" : "No readable content available."}</p>`;
-    return locateHighlights(source, annotations, activeSearchQuery);
-  }, [activeSearchQuery, annotations, isZh, selectedArticle]);
+    return locateHighlights(source, annotations, activeReaderSearchQuery);
+  }, [activeReaderSearchQuery, annotations, isZh, selectedArticle]);
 
   const bodySearchMatchCount = useMemo(() => {
-    if (!readerHtml || !activeSearchQuery) return 0;
+    if (!readerHtml || !activeReaderSearchQuery) return 0;
     const document = new DOMParser().parseFromString(`<body>${readerHtml}</body>`, "text/html");
     return document.body.querySelectorAll(".search-highlight").length;
-  }, [activeSearchQuery, readerHtml]);
-
-  const annotationSearchMatchCount = useMemo(
-    () =>
-      annotations.reduce(
-        (sum, annotation) =>
-          sum +
-          countQueryMatches(annotation.selectedText, activeSearchQuery) +
-          countQueryMatches(annotation.noteText, activeSearchQuery),
-        0,
-      ),
-    [activeSearchQuery, annotations],
-  );
-  const totalSearchMatchCount = bodySearchMatchCount + annotationSearchMatchCount;
+  }, [activeReaderSearchQuery, readerHtml]);
+  const readerSearchMatchLabel = activeReaderSearchQuery
+    ? bodySearchMatchCount === 0
+      ? "0 / 0"
+      : `${readerSearchMatchIndex + 1} / ${bodySearchMatchCount}`
+    : null;
   const activeSummary = selectedArticle
     ? summaryCache[selectedArticle.id]?.[summaryLang] ??
       (selectedArticle.summaryLang === summaryLang ? selectedArticle.summary ?? null : null)
@@ -1132,6 +1148,8 @@ function App() {
     setSelectionTranslation(null);
     setIsAnnotationDrawerOpen(false);
     setIsSummaryPanelOpen(false);
+    setIsReaderSearchOpen(false);
+    resetReaderSearch();
   }, [selectedFeedId, readFilter]);
 
   useEffect(() => {
@@ -1276,6 +1294,8 @@ function App() {
     pendingTextSelectionRef.current = null;
     isSummaryLangPinnedRef.current = false;
     setIsSummaryPanelOpen(false);
+    setIsReaderSearchOpen(false);
+    resetReaderSearch();
     setSelectedArticleId(articleId);
     setReadView("original");
   }
@@ -1293,6 +1313,8 @@ function App() {
     setSelectionTranslation(null);
     pendingTextSelectionRef.current = null;
     setIsSummaryPanelOpen(false);
+    setIsReaderSearchOpen(false);
+    resetReaderSearch();
     setSelectedFeedId(feedId);
     setReadView("original");
     setReadFilter("all");
@@ -1624,54 +1646,34 @@ function App() {
     window.setTimeout(() => mark.classList.remove("annotation-highlight-focus"), 1400);
   }
 
-  function focusSearchMatch(index: number) {
-    if (totalSearchMatchCount === 0) return;
-    const normalizedIndex = (index + totalSearchMatchCount) % totalSearchMatchCount;
-    setSearchMatchIndex(normalizedIndex);
+  function focusReaderSearchMatch(index: number) {
+    if (bodySearchMatchCount === 0) return;
+    const normalizedIndex = (index + bodySearchMatchCount) % bodySearchMatchCount;
+    setReaderSearchMatchIndex(normalizedIndex);
 
     document.querySelectorAll(".current-search-match").forEach((item) => {
       item.classList.remove("current-search-match");
     });
 
-    if (normalizedIndex < bodySearchMatchCount) {
-      const mark = readerHtmlRef.current?.querySelectorAll<HTMLElement>(".search-highlight")[normalizedIndex];
-      if (mark) {
-        mark.classList.add("current-search-match");
-        mark.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-      return;
+    const mark = readerHtmlRef.current?.querySelectorAll<HTMLElement>(".search-highlight")[normalizedIndex];
+    if (mark) {
+      mark.classList.add("current-search-match");
+      mark.scrollIntoView({ behavior: "smooth", block: "center" });
     }
-
-    setIsAnnotationDrawerOpen(true);
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        const annotationIndex = normalizedIndex - bodySearchMatchCount;
-        const mark = annotationPanelRef.current?.querySelectorAll<HTMLElement>(".search-highlight")[annotationIndex];
-        if (mark) {
-          mark.classList.add("current-search-match");
-          mark.scrollIntoView({ behavior: "smooth", block: "center" });
-        }
-      });
-    });
   }
 
   useEffect(() => {
-    if (!activeSearchQuery) return;
+    if (!activeReaderSearchQuery) return;
     const frame = window.requestAnimationFrame(() => {
       const firstMatch = readerHtmlRef.current?.querySelector(".search-highlight");
       if (firstMatch) {
-        setSearchMatchIndex(0);
+        setReaderSearchMatchIndex(0);
+        firstMatch.classList.add("current-search-match");
         firstMatch.scrollIntoView({ behavior: "smooth", block: "center" });
-        return;
       }
-      const annotationMatch = annotations.some((annotation) =>
-        textMatchesQuery(annotation.selectedText, activeSearchQuery) ||
-        textMatchesQuery(annotation.noteText, activeSearchQuery),
-      );
-      if (annotationMatch) setIsAnnotationDrawerOpen(true);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeSearchQuery, annotations, selectedArticle?.id, readerHtml]);
+  }, [activeReaderSearchQuery, selectedArticle?.id, readerHtml]);
 
   const clampColumnWidths = useCallback((nextSidebarWidth: number, nextArticleListWidth: number) => {
     const shellWidth = appShellRef.current?.clientWidth ?? 0;
@@ -1784,9 +1786,14 @@ function App() {
         appLanguage={appLanguage}
         selectedFeedId={selectedFeedId}
         syncStatus={syncStatus}
+        searchQuery={librarySearchQuery}
+        isSearching={false}
         onSelectFeed={handleSelectFeed}
         onFeedsChange={loadData}
         onSyncStatusChange={refreshSyncStatus}
+        onSearchQueryChange={setLibrarySearchQuery}
+        onSearch={runSearch}
+        onClearSearch={resetSearch}
       />
       <button
         type="button"
@@ -1806,28 +1813,12 @@ function App() {
         selectedArticleId={selectedListArticle?.id ?? null}
         isLoading={isLoading}
         readFilter={readFilter}
-        searchQuery={searchQuery}
-        searchScope={searchScope}
-        activeSearchQuery={activeSearchQuery}
-        searchMatchLabel={
-          activeSearchQuery
-            ? totalSearchMatchCount === 0
-              ? "0 / 0"
-              : `${searchMatchIndex + 1} / ${totalSearchMatchCount}`
-            : null
-        }
         isUpdatingReadStatus={isUpdatingReadStatus}
         onSelectArticle={handleSelectArticle}
         onReadFilterChange={setReadFilter}
-        onSearchQueryChange={setSearchQuery}
-        onSearchScopeChange={setSearchScope}
-        onSearch={runSearch}
-        onClearSearch={resetSearch}
-        onPreviousSearchMatch={() => focusSearchMatch(searchMatchIndex - 1)}
-        onNextSearchMatch={() => focusSearchMatch(searchMatchIndex + 1)}
         onToggleFavorite={toggleFavorite}
         onMarkCurrentFeedRead={handleMarkCurrentFeedRead}
-        highlightText={(text) => highlightText(text, activeSearchQuery)}
+        highlightText={(text) => highlightText(text, activeLibrarySearchQuery)}
       />
       <button
         type="button"
@@ -2037,6 +2028,70 @@ function App() {
 
             {aiError && <div className="error-box">{aiError}</div>}
 
+            {selectedArticle && !readerPdfUrl && !readerOriginalUrl && isReaderSearchOpen && (
+              <div className="reader-search-panel">
+                <div className="search-input-shell">
+                  <input
+                    ref={readerSearchInputRef}
+                    value={readerSearchQuery}
+                    onChange={(event) => {
+                      const nextQuery = event.target.value;
+                      setReaderSearchQuery(nextQuery);
+                      setActiveReaderSearchQuery(nextQuery.trim());
+                      setReaderSearchMatchIndex(0);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        if (event.shiftKey) {
+                          focusReaderSearchMatch(readerSearchMatchIndex - 1);
+                        } else {
+                          focusReaderSearchMatch(readerSearchMatchIndex + 1);
+                        }
+                      }
+                    }}
+                    placeholder={isZh ? "在当前文章中搜索..." : "Search in this article..."}
+                  />
+                  {readerSearchQuery && (
+                    <button
+                      className="search-clear-button"
+                      type="button"
+                      aria-label={isZh ? "清空搜索" : "Clear search"}
+                      onClick={resetReaderSearch}
+                    >
+                      <span className="search-clear-icon" aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+                <div className="reader-search-actions">
+                  <span>{readerSearchMatchLabel ?? "0 / 0"}</span>
+                  <button
+                    type="button"
+                    disabled={bodySearchMatchCount === 0}
+                    onClick={() => focusReaderSearchMatch(readerSearchMatchIndex - 1)}
+                  >
+                    {isZh ? "上一个" : "Previous"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={bodySearchMatchCount === 0}
+                    onClick={() => focusReaderSearchMatch(readerSearchMatchIndex + 1)}
+                  >
+                    {isZh ? "下一个" : "Next"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsReaderSearchOpen(false);
+                      resetReaderSearch();
+                    }}
+                  >
+                    {isZh ? "关闭" : "Close"}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {selectedArticle && isSummaryPanelOpen && (
               <div className="ai-result-section">
                 <div className="ai-result-header">
@@ -2206,7 +2261,7 @@ function App() {
                               type="button"
                               onClick={() => jumpToAnnotation(annotation.id)}
                             >
-                              {highlightText(annotation.selectedText, activeSearchQuery)}
+                              {highlightText(annotation.selectedText, activeReaderSearchQuery)}
                             </button>
                           )}
                           {editingAnnotationId === annotation.id ? (
@@ -2239,7 +2294,7 @@ function App() {
                             </div>
                           ) : (
                             <>
-                              {annotation.noteText && <p>{highlightText(annotation.noteText, activeSearchQuery)}</p>}
+                              {annotation.noteText && <p>{highlightText(annotation.noteText, activeReaderSearchQuery)}</p>}
                               {pendingDeleteId === annotation.id ? (
                                 <div className="annotation-delete-confirm">
                                   <span>{isZh ? "删除这条批注？" : "Delete this annotation?"}</span>

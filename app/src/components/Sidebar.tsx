@@ -1,4 +1,4 @@
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useState, type FormEvent, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Article, Feed, SyncStatus, SyncReport, SyncConfig, AppLanguage, OpmlImportReport } from "../types";
 import bookiBuddyLogo from "../assets/bookibuddy-logo.svg";
@@ -15,9 +15,14 @@ type Props = {
   appLanguage: AppLanguage;
   selectedFeedId: string;
   syncStatus: SyncStatus | null;
+  searchQuery: string;
+  isSearching: boolean;
   onSelectFeed: (id: string) => void;
   onFeedsChange: () => void;
   onSyncStatusChange: () => void;
+  onSearchQueryChange: (query: string) => void;
+  onSearch: (event?: FormEvent<HTMLFormElement>) => void;
+  onClearSearch: () => void;
 };
 
 export function Sidebar({
@@ -29,9 +34,14 @@ export function Sidebar({
   appLanguage,
   selectedFeedId,
   syncStatus,
+  searchQuery,
+  isSearching,
   onSelectFeed,
   onFeedsChange,
   onSyncStatusChange,
+  onSearchQueryChange,
+  onSearch,
+  onClearSearch,
 }: Props) {
   const isZh = appLanguage === "zh";
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -272,6 +282,33 @@ export function Sidebar({
           <p>{isZh ? "Your Reading Pal!" : "Your Reading Pal!"}</p>
         </div>
       </div>
+
+      <form className="sidebar-search" onSubmit={(event) => onSearch(event)}>
+        <div className="search-input-shell">
+          <input
+            value={searchQuery}
+            onChange={(event) => {
+              const value = event.target.value;
+              onSearchQueryChange(value);
+              if (!value.trim()) onClearSearch();
+            }}
+            placeholder={isZh ? "搜索全部文章..." : "Search all articles..."}
+          />
+          {searchQuery && (
+            <button
+              className="search-clear-button"
+              type="button"
+              aria-label={isZh ? "清空搜索" : "Clear search"}
+              onClick={onClearSearch}
+            >
+              <span className="search-clear-icon" aria-hidden="true" />
+            </button>
+          )}
+        </div>
+        <button type="submit" className="sidebar-search-button">
+          {isSearching ? (isZh ? "搜索中..." : "Searching...") : isZh ? "搜索" : "Search"}
+        </button>
+      </form>
 
       <section className="panel-section">
         <div className="section-header">
