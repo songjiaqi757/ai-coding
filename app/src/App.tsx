@@ -499,6 +499,7 @@ function App() {
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
+  const [isSummaryPanelOpen, setIsSummaryPanelOpen] = useState(false);
   const [summaryJob, setSummaryJob] = useState<AiJobStatus | null>(null);
   const [translationJob, setTranslationJob] = useState<AiJobStatus | null>(null);
   const [selectionOverlay, setSelectionOverlay] = useState<SelectionOverlay | null>(null);
@@ -1130,6 +1131,7 @@ function App() {
     setSelectionOverlay(null);
     setSelectionTranslation(null);
     setIsAnnotationDrawerOpen(false);
+    setIsSummaryPanelOpen(false);
   }, [selectedFeedId, readFilter]);
 
   useEffect(() => {
@@ -1273,6 +1275,7 @@ function App() {
     setSelectionTranslation(null);
     pendingTextSelectionRef.current = null;
     isSummaryLangPinnedRef.current = false;
+    setIsSummaryPanelOpen(false);
     setSelectedArticleId(articleId);
     setReadView("original");
   }
@@ -1289,6 +1292,7 @@ function App() {
     setSelectionOverlay(null);
     setSelectionTranslation(null);
     pendingTextSelectionRef.current = null;
+    setIsSummaryPanelOpen(false);
     setSelectedFeedId(feedId);
     setReadView("original");
     setReadFilter("all");
@@ -1969,11 +1973,11 @@ function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleSummarize()}
-                    disabled={isSummarizing || !selectedArticle}
-                    className={isSummarizing ? "reader-action-button action-loading" : "reader-action-button"}
-                    title={isSummarizing ? (isZh ? "正在生成摘要" : "Generating summary") : hasActiveSummary ? (isZh ? "重新生成摘要" : "Regenerate summary") : isZh ? "生成摘要" : "Generate summary"}
-                    aria-label={isSummarizing ? (isZh ? "正在生成摘要" : "Generating summary") : hasActiveSummary ? (isZh ? "重新生成摘要" : "Regenerate summary") : isZh ? "生成摘要" : "Generate summary"}
+                    onClick={() => setIsSummaryPanelOpen((current) => !current)}
+                    disabled={!selectedArticle}
+                    className={isSummaryPanelOpen ? "reader-action-button active" : "reader-action-button"}
+                    title={isSummaryPanelOpen ? (isZh ? "收起摘要" : "Hide summary") : isZh ? "展开摘要" : "Show summary"}
+                    aria-label={isSummaryPanelOpen ? (isZh ? "收起摘要" : "Hide summary") : isZh ? "展开摘要" : "Show summary"}
                   >
                     <svg aria-hidden="true" viewBox="0 0 20 20">
                       <path d="M5 5.5h10" />
@@ -1981,7 +1985,7 @@ function App() {
                       <path d="M5 12.5h6.5" />
                       <path d="M13 13.5h2.5" />
                     </svg>
-                    <span>{isSummarizing ? (isZh ? "生成中..." : "Generating...") : isZh ? "摘要" : "Summary"}</span>
+                    <span>{isZh ? "摘要" : "Summary"}</span>
                   </button>
                   <button
                     type="button"
@@ -2033,7 +2037,7 @@ function App() {
 
             {aiError && <div className="error-box">{aiError}</div>}
 
-            {selectedArticle && (
+            {selectedArticle && isSummaryPanelOpen && (
               <div className="ai-result-section">
                 <div className="ai-result-header">
                   <div className="ai-result-label">{isZh ? "摘要" : "Summary"}</div>
