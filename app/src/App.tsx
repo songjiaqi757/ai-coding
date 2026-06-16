@@ -2057,7 +2057,7 @@ function App() {
                     ? activeSummary
                     : isCurrentSummaryRunning
                       ? (isZh ? "正在生成该语言的摘要..." : "Generating summary in this language...")
-                      : (isZh ? "请在设置中选择摘要语言后，再点击“生成摘要”。" : "Choose the summary language in Settings, then click Generate.")}
+                      : (isZh ? "当前语言还没有摘要。" : "No summary yet in this language.")}
                 </div>
               </div>
             )}
