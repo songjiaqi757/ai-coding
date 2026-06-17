@@ -88,13 +88,11 @@ export function Sidebar({
     }
 
     window.addEventListener("click", closeMenu);
-    window.addEventListener("contextmenu", closeMenu);
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("resize", closeMenu);
     window.addEventListener("scroll", closeMenu, true);
     return () => {
       window.removeEventListener("click", closeMenu);
-      window.removeEventListener("contextmenu", closeMenu);
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("resize", closeMenu);
       window.removeEventListener("scroll", closeMenu, true);
@@ -443,6 +441,18 @@ export function Sidebar({
               onContextMenu={(event) => {
                 if (isLocalOnlyFeed(feed)) return;
                 event.preventDefault();
+                event.stopPropagation();
+                setFeedContextMenu({
+                  feedId: feed.id,
+                  feedTitle: feed.title,
+                  x: event.clientX,
+                  y: event.clientY,
+                });
+              }}
+              onMouseDown={(event) => {
+                if (isLocalOnlyFeed(feed) || event.button !== 2) return;
+                event.preventDefault();
+                event.stopPropagation();
                 setFeedContextMenu({
                   feedId: feed.id,
                   feedTitle: feed.title,
