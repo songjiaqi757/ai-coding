@@ -32,6 +32,8 @@ const SECRET_SETTING_KEYS: [&str; 3] = [
 ];
 pub(crate) const FEED_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 BookiBuddy/0.1 feed-import";
+const ARTICLE_USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 pub(crate) const SAVED_ARTICLES_FEED_ID: &str = "saved";
 const SAVED_ARTICLES_FEED_TITLE: &str = "__internal_captured_articles";
 const SAVED_ARTICLES_FEED_URL: &str = "bookibuddy://internal/captured-articles";
@@ -1857,9 +1859,23 @@ a { color: #8b5e1a; }
     }
 
     if lower.contains("<html") {
-        return format!(
-            "<!doctype html><html><head>{meta_charset}{viewport}{base_tag}{style}</head><body>{cleaned}</body></html>"
-        );
+        if let Some(html_index) = lower.find("<html") {
+            if let Some(tag_end) = cleaned[html_index..].find('>') {
+                let insert_at = html_index + tag_end + 1;
+                let mut document = String::with_capacity(cleaned.len() + 256);
+                document.push_str(&cleaned[..insert_at]);
+                document.push_str("<head>");
+                document.push_str(meta_charset);
+                document.push_str(viewport);
+                document.push_str(&base_tag);
+                document.push_str(style);
+                document.push_str("</head>");
+                document.push_str(&cleaned[insert_at..]);
+                return document;
+            }
+        }
+
+        return cleaned;
     }
 
     format!(
@@ -2087,11 +2103,7 @@ async fn fetch_html(url: &str) -> Result<String, String> {
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
         .http1_only()
-        .user_agent(concat!(
-            env!("CARGO_PKG_NAME"),
-            "/",
-            env!("CARGO_PKG_VERSION")
-        ))
+        .user_agent(ARTICLE_USER_AGENT)
         .build()
         .map_err(|error| {
             format!(
