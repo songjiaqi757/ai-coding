@@ -2246,6 +2246,39 @@ async fn refresh_feed(app: AppHandle, feed_id: String) -> Result<Vec<Article>, S
 }
 
 #[tauri::command]
+fn delete_feed(app: AppHandle, feed_id: String) -> Result<(), String> {
+    if feed_id == SAVED_ARTICLES_FEED_ID {
+        return Err("Internal feeds cannot be deleted.".to_string());
+    }
+
+    let conn = open_database(&app)?;
+    let mut stmt = conn
+        .prepare("SELECT id, url FROM feeds WHERE id = ?1 LIMIT 1")
+        .map_err(|error| format!("Failed to prepare feed lookup: {error}"))?;
+    let feed = stmt
+        .query_row(params![&feed_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()
+        .map_err(|error| format!("Failed to load feed before deletion: {error}"))?;
+
+    let Some((existing_feed_id, existing_url)) = feed else {
+        return Ok(());
+    };
+
+    if existing_feed_id == SAVED_ARTICLES_FEED_ID || existing_url == SAVED_ARTICLES_FEED_URL {
+        return Err("Internal feeds cannot be deleted.".to_string());
+    }
+
+    conn.execute("DELETE FROM articles WHERE feed_id = ?1", params![&feed_id])
+        .map_err(|error| format!("Failed to delete feed articles: {error}"))?;
+    conn.execute("DELETE FROM feeds WHERE id = ?1", params![&feed_id])
+        .map_err(|error| format!("Failed to delete feed: {error}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
 fn list_feeds(app: AppHandle) -> Result<Vec<Feed>, String> {
     let conn = open_database(&app)?;
     let mut stmt = conn
@@ -3603,6 +3636,7 @@ pub fn run() {
             search_articles,
             add_feed,
             refresh_feed,
+            delete_feed,
             sync::start_sync,
             sync::get_sync_status,
             sync::retry_failed_syncs,

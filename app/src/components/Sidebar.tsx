@@ -56,6 +56,12 @@ export function Sidebar({
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [showSyncConfig, setShowSyncConfig] = useState(false);
+  const [feedContextMenu, setFeedContextMenu] = useState<{
+    feedId: string;
+    feedTitle: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [syncConfig, setSyncConfig] = useState<SyncConfig>({
     enabled: false,
     intervalMinutes: 30,
@@ -67,6 +73,33 @@ export function Sidebar({
   useEffect(() => {
     void loadSyncConfig();
   }, []);
+
+  useEffect(() => {
+    if (!feedContextMenu) return;
+
+    function closeMenu() {
+      setFeedContextMenu(null);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    }
+
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("contextmenu", closeMenu);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("contextmenu", closeMenu);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [feedContextMenu]);
 
   async function loadSyncConfig() {
     try {
@@ -136,6 +169,30 @@ export function Sidebar({
       setRefreshError(message);
     } finally {
       setRefreshingFeedId(null);
+    }
+  }
+
+  async function handleDeleteFeed(feedId: string, feedTitle: string) {
+    setFeedContextMenu(null);
+    const confirmed = window.confirm(
+      isZh ? `删除订阅源“${feedTitle}”及其文章？` : `Delete "${feedTitle}" and its articles?`,
+    );
+    if (!confirmed) return;
+
+    try {
+      await invoke("delete_feed", { feedId });
+      if (selectedFeedId === feedId) {
+        onSelectFeed("all");
+      }
+      onFeedsChange();
+    } catch (error) {
+      const message =
+        typeof error === "string" || error instanceof Error
+          ? error.toString()
+          : isZh
+            ? "删除订阅源失败"
+            : "Failed to delete subscription";
+      setSyncError(message);
     }
   }
 
@@ -383,6 +440,16 @@ export function Sidebar({
               className={
                 feed.id === selectedFeedId ? "feed-item active" : "feed-item"
               }
+              onContextMenu={(event) => {
+                if (isLocalOnlyFeed(feed)) return;
+                event.preventDefault();
+                setFeedContextMenu({
+                  feedId: feed.id,
+                  feedTitle: feed.title,
+                  x: event.clientX,
+                  y: event.clientY,
+                });
+              }}
             >
               <button
                 className="feed-title"
@@ -428,6 +495,21 @@ export function Sidebar({
             </div>
           ))}
         </div>
+        {feedContextMenu && (
+          <div
+            className="feed-context-menu"
+            style={{ left: feedContextMenu.x, top: feedContextMenu.y }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="feed-context-menu-item danger"
+              onClick={() => void handleDeleteFeed(feedContextMenu.feedId, feedContextMenu.feedTitle)}
+            >
+              {isZh ? "删除订阅源" : "Delete subscription"}
+            </button>
+          </div>
+        )}
       </section>
 
       <section className="panel-section sync-config-section">
