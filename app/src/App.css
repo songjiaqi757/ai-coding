@@ -1564,6 +1564,13 @@ button {
   font-weight: 600;
 }
 
+.settings-field-note {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
 .settings-form input {
   padding: 11px 14px;
   border: 1px solid #d0d7e2;

@@ -2567,6 +2567,11 @@ function App() {
                     value={settingsForm.summaryApiKey}
                     onChange={(e) => setSettingsForm((f) => ({ ...f, summaryApiKey: e.target.value }))}
                   />
+                  <small className="settings-field-note">
+                    {isZh
+                      ? "密钥会安全保存在系统钥匙串/凭据库中，不会明文写入本地数据库。"
+                      : "Keys are stored in the system credential store and are not written to the local database in plain text."}
+                  </small>
                 </label>
                 <div className="secret-setting-row">
                   <span className="secret-setting-status">
@@ -2621,6 +2626,11 @@ function App() {
                     value={settingsForm.translationApiKey}
                     onChange={(e) => setSettingsForm((f) => ({ ...f, translationApiKey: e.target.value }))}
                   />
+                  <small className="settings-field-note">
+                    {isZh
+                      ? "密钥会安全保存在系统钥匙串/凭据库中，不会明文写入本地数据库。"
+                      : "Keys are stored in the system credential store and are not written to the local database in plain text."}
+                  </small>
                 </label>
                 <div className="secret-setting-row">
                   <span className="secret-setting-status">
