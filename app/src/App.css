@@ -1583,6 +1583,31 @@ button {
   font-size: 14px;
 }
 
+.secret-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: -4px;
+}
+
+.secret-setting-status {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.secret-setting-action {
+  flex-shrink: 0;
+  padding: 7px 10px;
+  border: 1px solid #d0d7e2;
+  border-radius: 10px;
+  background: white;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .settings-range-field {
   gap: 10px;
 }

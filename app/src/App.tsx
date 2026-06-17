@@ -583,6 +583,10 @@ function App() {
   });
   const [appLanguage, setAppLanguage] = useState<AppLanguage>("zh");
   const [settingsLanguage, setSettingsLanguage] = useState<AppLanguage>("zh");
+  const [secretStatus, setSecretStatus] = useState({
+    summaryApiKeySaved: false,
+    translationApiKeySaved: false,
+  });
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
@@ -771,38 +775,40 @@ function App() {
     try {
       const [
         legacyBaseUrl,
-        legacyApiKey,
         legacyModelName,
         summaryBaseUrl,
-        summaryApiKey,
         summaryModelName,
         translationBaseUrl,
-        translationApiKey,
         translationModelName,
+        summaryApiKeySaved,
+        translationApiKeySaved,
         savedSummaryTargetLang,
         savedTranslationTargetLang,
         savedLanguage,
       ] = await Promise.all([
         invoke<string | null>("load_setting", { key: "llm_base_url" }),
-        invoke<string | null>("load_setting", { key: "llm_api_key" }),
         invoke<string | null>("load_setting", { key: "llm_model_name" }),
         invoke<string | null>("load_setting", { key: "llm_summary_base_url" }),
-        invoke<string | null>("load_setting", { key: "llm_summary_api_key" }),
         invoke<string | null>("load_setting", { key: "llm_summary_model_name" }),
         invoke<string | null>("load_setting", { key: "llm_translation_base_url" }),
-        invoke<string | null>("load_setting", { key: "llm_translation_api_key" }),
         invoke<string | null>("load_setting", { key: "llm_translation_model_name" }),
+        invoke<boolean>("has_secret_setting", { key: "llm_summary_api_key" }),
+        invoke<boolean>("has_secret_setting", { key: "llm_translation_api_key" }),
         invoke<string | null>("load_setting", { key: "llm_summary_target_lang" }),
         invoke<string | null>("load_setting", { key: "llm_translation_target_lang" }),
         invoke<AppLanguage | null>("load_setting", { key: "app_language" }),
       ]);
       setSettingsForm({
         summaryBaseUrl: summaryBaseUrl ?? legacyBaseUrl ?? "",
-        summaryApiKey: summaryApiKey ?? legacyApiKey ?? "",
+        summaryApiKey: "",
         summaryModelName: summaryModelName ?? legacyModelName ?? "",
         translationBaseUrl: translationBaseUrl ?? legacyBaseUrl ?? "",
-        translationApiKey: translationApiKey ?? legacyApiKey ?? "",
+        translationApiKey: "",
         translationModelName: translationModelName ?? legacyModelName ?? "",
+      });
+      setSecretStatus({
+        summaryApiKeySaved: summaryApiKeySaved ?? false,
+        translationApiKeySaved: translationApiKeySaved ?? false,
       });
       if (savedSummaryTargetLang) {
         setSummaryLang(savedSummaryTargetLang);
@@ -846,26 +852,69 @@ function App() {
   async function handleSaveSettings() {
     try {
       setIsSavingSettings(true);
-      await Promise.all([
+      const saveTasks: Promise<unknown>[] = [
         invoke("save_setting", { key: "llm_base_url", value: settingsForm.summaryBaseUrl }),
-        invoke("save_setting", { key: "llm_api_key", value: settingsForm.summaryApiKey }),
         invoke("save_setting", { key: "llm_model_name", value: settingsForm.summaryModelName }),
         invoke("save_setting", { key: "llm_summary_base_url", value: settingsForm.summaryBaseUrl }),
-        invoke("save_setting", { key: "llm_summary_api_key", value: settingsForm.summaryApiKey }),
         invoke("save_setting", { key: "llm_summary_model_name", value: settingsForm.summaryModelName }),
         invoke("save_setting", { key: "llm_translation_base_url", value: settingsForm.translationBaseUrl }),
-        invoke("save_setting", { key: "llm_translation_api_key", value: settingsForm.translationApiKey }),
         invoke("save_setting", { key: "llm_translation_model_name", value: settingsForm.translationModelName }),
         invoke("save_setting", { key: "llm_summary_target_lang", value: summaryLang }),
         invoke("save_setting", { key: "llm_translation_target_lang", value: targetLang }),
         invoke("save_setting", { key: "app_language", value: settingsLanguage }),
-      ]);
+      ];
+      if (settingsForm.summaryApiKey.trim()) {
+        saveTasks.push(
+          invoke("save_secret_setting", {
+            key: "llm_summary_api_key",
+            value: settingsForm.summaryApiKey.trim(),
+          }),
+        );
+      }
+      if (settingsForm.translationApiKey.trim()) {
+        saveTasks.push(
+          invoke("save_secret_setting", {
+            key: "llm_translation_api_key",
+            value: settingsForm.translationApiKey.trim(),
+          }),
+        );
+      }
+      await Promise.all(saveTasks);
+      setSecretStatus((current) => ({
+        summaryApiKeySaved: current.summaryApiKeySaved || settingsForm.summaryApiKey.trim().length > 0,
+        translationApiKeySaved:
+          current.translationApiKeySaved || settingsForm.translationApiKey.trim().length > 0,
+      }));
+      setSettingsForm((current) => ({
+        ...current,
+        summaryApiKey: "",
+        translationApiKey: "",
+      }));
       setAppLanguage(settingsLanguage);
       setShowSettings(false);
     } catch (error) {
       setAiError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsSavingSettings(false);
+    }
+  }
+
+  async function handleDeleteSecretSetting(key: "llm_summary_api_key" | "llm_translation_api_key") {
+    try {
+      await invoke("delete_secret_setting", { key });
+      setSecretStatus((current) => ({
+        ...current,
+        summaryApiKeySaved: key === "llm_summary_api_key" ? false : current.summaryApiKeySaved,
+        translationApiKeySaved:
+          key === "llm_translation_api_key" ? false : current.translationApiKeySaved,
+      }));
+      setSettingsForm((current) => ({
+        ...current,
+        summaryApiKey: key === "llm_summary_api_key" ? "" : current.summaryApiKey,
+        translationApiKey: key === "llm_translation_api_key" ? "" : current.translationApiKey,
+      }));
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -2510,11 +2559,31 @@ function App() {
                   API Key
                   <input
                     type="password"
-                    placeholder={isZh ? "sk-...（使用 Ollama 可留空）" : "sk-... (leave empty for Ollama)"}
+                    placeholder={
+                      secretStatus.summaryApiKeySaved
+                        ? (isZh ? "已保存，输入新值可覆盖" : "Saved. Enter a new value to replace it.")
+                        : (isZh ? "sk-...（使用 Ollama 可留空）" : "sk-... (leave empty for Ollama)")
+                    }
                     value={settingsForm.summaryApiKey}
                     onChange={(e) => setSettingsForm((f) => ({ ...f, summaryApiKey: e.target.value }))}
                   />
                 </label>
+                <div className="secret-setting-row">
+                  <span className="secret-setting-status">
+                    {secretStatus.summaryApiKeySaved
+                      ? (isZh ? "API Key 已保存在系统钥匙串中" : "API key is saved in the system credential store")
+                      : (isZh ? "尚未保存 API Key" : "No API key saved yet")}
+                  </span>
+                  {secretStatus.summaryApiKeySaved && (
+                    <button
+                      type="button"
+                      className="secret-setting-action"
+                      onClick={() => void handleDeleteSecretSetting("llm_summary_api_key")}
+                    >
+                      {isZh ? "清除已保存密钥" : "Delete saved key"}
+                    </button>
+                  )}
+                </div>
 
                 <label>
                   {isZh ? "摘要模型" : "Summary Model"}
@@ -2544,11 +2613,31 @@ function App() {
                   API Key
                   <input
                     type="password"
-                    placeholder={isZh ? "sk-...（使用 Ollama 可留空）" : "sk-... (leave empty for Ollama)"}
+                    placeholder={
+                      secretStatus.translationApiKeySaved
+                        ? (isZh ? "已保存，输入新值可覆盖" : "Saved. Enter a new value to replace it.")
+                        : (isZh ? "sk-...（使用 Ollama 可留空）" : "sk-... (leave empty for Ollama)")
+                    }
                     value={settingsForm.translationApiKey}
                     onChange={(e) => setSettingsForm((f) => ({ ...f, translationApiKey: e.target.value }))}
                   />
                 </label>
+                <div className="secret-setting-row">
+                  <span className="secret-setting-status">
+                    {secretStatus.translationApiKeySaved
+                      ? (isZh ? "API Key 已保存在系统钥匙串中" : "API key is saved in the system credential store")
+                      : (isZh ? "尚未保存 API Key" : "No API key saved yet")}
+                  </span>
+                  {secretStatus.translationApiKeySaved && (
+                    <button
+                      type="button"
+                      className="secret-setting-action"
+                      onClick={() => void handleDeleteSecretSetting("llm_translation_api_key")}
+                    >
+                      {isZh ? "清除已保存密钥" : "Delete saved key"}
+                    </button>
+                  )}
+                </div>
 
                 <label>
                   {isZh ? "翻译模型" : "Translation Model"}

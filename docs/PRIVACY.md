@@ -22,4 +22,14 @@
 
 用户可以选择本地模型或兼容标准 API 的模型服务。
 
-API key 仅保存在用户本地配置中，不会作为应用默认值内置到仓库或发布包中。
+API key 不会作为应用默认值内置到仓库或发布包中。
+
+API key 保存在用户本机的系统凭据库中，而不是应用自己的 SQLite 明文配置表中：
+
+- macOS 使用 Keychain；
+- Windows 使用 Credential Manager；
+- Linux 使用 Secret Service / 桌面环境提供的凭据存储。
+
+应用本地 SQLite 仅保存非敏感配置（例如 API Base URL、模型名、目标语言等）。
+
+如果用户在旧版本中曾将 API key 明文保存在本地 SQLite，应用会在后续启动时自动迁移到系统凭据库，并删除 SQLite 中的旧明文值。

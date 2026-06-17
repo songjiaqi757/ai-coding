@@ -24,6 +24,12 @@ use uuid::Uuid;
 
 const CLEANER_VERSION: &str = "node-readability-v4";
 const FALLBACK_CLEANER_VERSION: &str = "rust-fallback-v1";
+const KEYRING_SERVICE_NAME: &str = "com.songjiaqi757.bookibuddy";
+const SECRET_SETTING_KEYS: [&str; 3] = [
+    "llm_api_key",
+    "llm_summary_api_key",
+    "llm_translation_api_key",
+];
 pub(crate) const FEED_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 BookiBuddy/0.1 feed-import";
 pub(crate) const SAVED_ARTICLES_FEED_ID: &str = "saved";
@@ -174,6 +180,7 @@ pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
     seed_setting_if_missing(&conn, "llm_summary_model_name", &default_model)?;
     seed_setting_if_missing(&conn, "llm_translation_base_url", &default_base_url)?;
     seed_setting_if_missing(&conn, "llm_translation_model_name", &default_model)?;
+    migrate_secret_settings(app, &conn)?;
 
     Ok(conn)
 }
@@ -2928,10 +2935,108 @@ fn load_setting_value(conn: &Connection, key: &str) -> Result<Option<String>, St
     })
 }
 
+fn is_secret_setting_key(key: &str) -> bool {
+    SECRET_SETTING_KEYS.contains(&key)
+}
+
+fn delete_setting_value(conn: &Connection, key: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", params![key])
+        .map_err(|error| format!("Failed to delete setting '{key}': {error}"))?;
+    Ok(())
+}
+
+fn load_secret_from_keyring(key: &str) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE_NAME, key)
+        .map_err(|error| format!("Failed to prepare secure storage for '{key}': {error}"))?;
+    match entry.get_password() {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(value))
+            }
+        }
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(format!(
+            "Failed to read secure setting '{key}' from the system credential store: {error}"
+        )),
+    }
+}
+
+fn save_secret_to_keyring(key: &str, value: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE_NAME, key)
+        .map_err(|error| format!("Failed to prepare secure storage for '{key}': {error}"))?;
+    if value.trim().is_empty() {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!(
+                "Failed to delete secure setting '{key}' from the system credential store: {error}"
+            )),
+        }
+    } else {
+        entry.set_password(value).map_err(|error| {
+            format!("Failed to store secure setting '{key}' in the system credential store: {error}")
+        })
+    }
+}
+
+fn migrate_secret_settings(_app: &AppHandle, conn: &Connection) -> Result<(), String> {
+    for key in SECRET_SETTING_KEYS {
+        let keyring_value = load_secret_from_keyring(key)?;
+        let sqlite_value = load_setting_value(conn, key)?;
+
+        if keyring_value.is_none() {
+            if let Some(value) = sqlite_value.as_ref().filter(|value| !value.trim().is_empty()) {
+                save_secret_to_keyring(key, value)?;
+            }
+        }
+
+        if sqlite_value.is_some() {
+            delete_setting_value(conn, key)?;
+        }
+    }
+
+    let legacy_value = load_secret_from_keyring("llm_api_key")?;
+    if let Some(legacy_api_key) = legacy_value {
+        if load_secret_from_keyring("llm_summary_api_key")?.is_none() {
+            save_secret_to_keyring("llm_summary_api_key", &legacy_api_key)?;
+        }
+        if load_secret_from_keyring("llm_translation_api_key")?.is_none() {
+            save_secret_to_keyring("llm_translation_api_key", &legacy_api_key)?;
+        }
+        save_secret_to_keyring("llm_api_key", "")?;
+    }
+
+    Ok(())
+}
+
+fn load_secret_setting_value(
+    conn: &Connection,
+    task_key: &str,
+    legacy_key: &str,
+) -> Result<Option<String>, String> {
+    if let Some(value) = load_secret_from_keyring(task_key)? {
+        return Ok(Some(value));
+    }
+
+    if let Some(value) = load_secret_from_keyring(legacy_key)? {
+        return Ok(Some(value));
+    }
+
+    match load_setting_value(conn, task_key)? {
+        Some(value) if !value.trim().is_empty() => Ok(Some(value)),
+        Some(_) => Ok(None),
+        None => match load_setting_value(conn, legacy_key)? {
+            Some(value) if !value.trim().is_empty() => Ok(Some(value)),
+            _ => Ok(None),
+        },
+    }
+}
+
 fn get_llm_config_from_db(conn: &Connection) -> Result<LlmConfig, String> {
     let base_url = load_setting_value(conn, "llm_base_url")?
         .ok_or("LLM Base URL not configured. Please set it in Settings.".to_string())?;
-    let api_key = load_setting_value(conn, "llm_api_key")?
+    let api_key = load_secret_setting_value(conn, "llm_summary_api_key", "llm_api_key")?
         .ok_or("LLM API Key not configured. Please set it in Settings.".to_string())?;
     let model_name = load_setting_value(conn, "llm_model_name")?
         .ok_or("LLM Model Name not configured. Please set it in Settings.".to_string())?;
@@ -2958,8 +3063,7 @@ fn get_llm_config_for_task(
         ));
     }
 
-    let api_key =
-        load_task_setting_with_legacy(conn, api_key_key, "llm_api_key")?.unwrap_or_default();
+    let api_key = load_secret_setting_value(conn, api_key_key, "llm_api_key")?.unwrap_or_default();
     let model_name = load_task_setting_with_legacy(conn, model_key, "llm_model_name")?
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
@@ -3140,6 +3244,12 @@ fn repair_translation_chunk_with_config(
 
 #[tauri::command]
 fn save_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
+    if is_secret_setting_key(&key) {
+        return Err(
+            "Sensitive settings are stored in the system credential store. Use secure setting commands instead."
+                .to_string(),
+        );
+    }
     let conn = open_database(&app)?;
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
@@ -3151,8 +3261,41 @@ fn save_setting(app: AppHandle, key: String, value: String) -> Result<(), String
 
 #[tauri::command]
 fn load_setting(app: AppHandle, key: String) -> Result<Option<String>, String> {
+    if is_secret_setting_key(&key) {
+        return Err(
+            "Sensitive settings cannot be loaded directly. Use secure setting status commands instead."
+                .to_string(),
+        );
+    }
     let conn = open_database(&app)?;
     load_setting_value(&conn, &key)
+}
+
+#[tauri::command]
+fn save_secret_setting(app: AppHandle, key: String, value: String) -> Result<(), String> {
+    if !is_secret_setting_key(&key) {
+        return Err(format!("Setting '{key}' is not registered as a secret setting."));
+    }
+    let _conn = open_database(&app)?;
+    save_secret_to_keyring(&key, &value)
+}
+
+#[tauri::command]
+fn has_secret_setting(app: AppHandle, key: String) -> Result<bool, String> {
+    if !is_secret_setting_key(&key) {
+        return Err(format!("Setting '{key}' is not registered as a secret setting."));
+    }
+    let conn = open_database(&app)?;
+    Ok(load_secret_setting_value(&conn, &key, "llm_api_key")?.is_some())
+}
+
+#[tauri::command]
+fn delete_secret_setting(app: AppHandle, key: String) -> Result<(), String> {
+    if !is_secret_setting_key(&key) {
+        return Err(format!("Setting '{key}' is not registered as a secret setting."));
+    }
+    let _conn = open_database(&app)?;
+    save_secret_to_keyring(&key, "")
 }
 
 #[tauri::command]
@@ -3455,6 +3598,9 @@ pub fn run() {
             sync::update_sync_config,
             save_setting,
             load_setting,
+            save_secret_setting,
+            has_secret_setting,
+            delete_secret_setting,
             get_llm_config,
             summarize_article,
             translate_article,
