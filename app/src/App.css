@@ -64,7 +64,10 @@ button {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  height: 100%;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
   padding: 20px 16px;
   border-right: 1px solid #dbe1ea;
   background: #f8fafc;
@@ -195,6 +198,18 @@ button {
   gap: 8px;
 }
 
+.sidebar > .panel-section:first-of-type {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.brand,
+.sidebar-search,
+.sync-config-section {
+  flex-shrink: 0;
+}
+
 .bottom-section {
   margin-top: auto;
 }
@@ -211,6 +226,11 @@ button {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+  margin-right: -4px;
 }
 
 .feed-item {

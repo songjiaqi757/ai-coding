@@ -12,8 +12,8 @@
 | 检查项 | 结果 |
 |--------|------|
 | `cargo check` | 通过 (0 error, 0 warning) |
-| `pnpm build` | 通过 (tsc + vite build 成功) |
-| `pnpm tauri dev` 启动 | 成功，桌面窗口正常打开 |
+| `npm run build` | 通过 (tsc + vite build 成功) |
+| `npm run tauri dev` 启动 | 成功，桌面窗口正常打开 |
 
 ---
 
@@ -56,7 +56,7 @@ B（`feature/hs2`，最新提交 `eeae0c2`）对前端做了大幅改动：
 
 ### B 验收清单
 
-- [x] `pnpm build` 通过
+- [x] `npm run build` 通过
 - [x] Saved Articles 不显示刷新按钮（`isLocalSavedFeed` 检查）
 - [x] 刷新/同步失败时 UI 显示错误信息（`refreshError` / `syncError`）
 - [x] 收藏/稍后读状态使用文字按钮，交互正常
@@ -97,7 +97,7 @@ const nextArticles = listFeedId === null
 | 检查项 | 结果 |
 |--------|------|
 | `cargo check` | 通过 |
-| `pnpm build` (tsc + vite) | 通过 |
+| `npm run build` (tsc + vite) | 通过 |
 
 ---
 
@@ -115,7 +115,7 @@ const nextArticles = listFeedId === null
 ### 代码层面测试验证（基于代码审查，非运行时测试）
 
 > **注意**：Playwright 无法驱动 Tauri 原生窗口，以下结论均来自对 Rust/TypeScript 源码的逐行审查。
-> 如需运行时验证，请在本地启动 `pnpm tauri dev` 后按第 4 节手动验收步骤操作。
+> 如需运行时验证，请在本地启动 `npm run tauri dev` 后按第 4 节手动验收步骤操作。
 
 由于后端 `save_articles` 使用 `INSERT OR IGNORE` + `UNIQUE(feed_id, url)` 去重，以下行为可从代码逻辑确认：
 
@@ -137,7 +137,7 @@ const nextArticles = listFeedId === null
 
 ```bash
 cd app/src-tauri && cargo check    # 通过
-cd app && pnpm build                # 通过
+cd app && npm run build             # 通过
 ```
 
 ### 手动验收步骤

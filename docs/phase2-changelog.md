@@ -1,6 +1,8 @@
 # Phase 2 变更说明：Feed / OPML / Sync
 
 > 本文档面向后续 Phase（Phase 3 ~ 7）的开发同学，帮助你快速了解 Phase 2 做了什么、改了哪些文件、数据库结构有什么变化。
+>
+> 这是 Phase 2 完成时的历史记录，不代表当前最新功能状态。当前总览请以根目录 `README.md` 为准。
 
 ---
 
@@ -88,7 +90,6 @@ articles (
 | `app/src/components/ArticleList.tsx` | 中间栏：文章列表、搜索框、空状态 |
 | `app/src/types.ts` | TypeScript 类型定义（Feed、Article），与 Rust 结构体对应 |
 | `samples/opml/example.opml` | 示例 OPML 文件（阮一峰、Hacker News、NASA） |
-| `docs/FEED_OPML.md` | OPML 功能使用说明 |
 
 ### 修改文件
 
@@ -163,11 +164,11 @@ App.tsx（主壳：状态管理 + 三栏布局）
 │   ├── + 按钮 → 添加订阅对话框
 │   └── ↑ 按钮 → OPML 文件导入
 ├── ArticleList.tsx（中间栏）
-│   ├── 搜索框（UI 已有，功能未实现）
+│   ├── 搜索框（Phase 2 当时为 UI 占位，后续已实现）
 │   └── 文章卡片列表
 └── Reader（右侧栏，直接在 App.tsx 内）
     ├── 文章标题 + 作者 + 日期
-    ├── 摘要 / 翻译按钮（目前是占位 alert）
+    ├── 摘要 / 翻译按钮（Phase 2 当时为占位，后续已实现）
     └── 文章正文（dangerouslySetInnerHTML）
 ```
 
@@ -188,7 +189,7 @@ App.tsx（主壳：状态管理 + 三栏布局）
 |---|---|---|
 | 孔慧婷 | Person A（Rust 后端） | 数据库 Schema 重构、add_feed、refresh_feed、save_articles、依赖管理 |
 | 何霜 | Person B（前端 UI） | Sidebar、ArticleList 组件、types.ts、App.tsx 重写、CSS 样式 |
-| 汪柔柔 | Person C（OPML + 集成） | opml.rs、example.opml、FEED_OPML.md、三人代码集成 |
+| 汪柔柔 | Person C（OPML + 集成） | opml.rs、example.opml、三人代码集成 |
 
 ---
 

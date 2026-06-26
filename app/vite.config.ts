@@ -6,7 +6,19 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: "bookibuddy-full-reload-react",
+      apply: "serve",
+      handleHotUpdate({ file, server }) {
+        if (!file.match(/src\/.*\.(t|j)sx?$/)) return;
+
+        server.ws.send({ type: "full-reload" });
+        return [];
+      },
+    },
+  ],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

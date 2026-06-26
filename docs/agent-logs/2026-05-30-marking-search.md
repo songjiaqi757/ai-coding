@@ -27,7 +27,7 @@ Run:
 
 ```bash
 cd app
-pnpm build
+npm run build
 cd src-tauri
 cargo check
 ```

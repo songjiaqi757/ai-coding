@@ -57,6 +57,14 @@ pub struct SyncReport {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ScheduledSyncResult {
+    pub ran: bool,
+    pub next_sync_at: Option<String>,
+    pub report: Option<SyncReport>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncConfig {
     pub enabled: bool,
     pub interval_minutes: i64,
@@ -153,6 +161,54 @@ pub async fn retry_failed_syncs(
     };
 
     run_sync_targets(app, state, targets).await
+}
+
+#[tauri::command]
+pub async fn run_scheduled_sync(
+    app: AppHandle,
+    state: State<'_, SyncState>,
+) -> Result<ScheduledSyncResult, String> {
+    let (config, due, targets) = {
+        let conn = open_database(&app)?;
+        let config = load_sync_config(&conn)?;
+        if !config.enabled {
+            return Ok(ScheduledSyncResult {
+                ran: false,
+                next_sync_at: config.next_sync_at,
+                report: None,
+            });
+        }
+
+        let due = sync_is_due(&conn, config.next_sync_at.as_deref())?;
+        let targets = if due {
+            load_all_sync_targets(&conn)?
+        } else {
+            Vec::new()
+        };
+        (config, due, targets)
+    };
+
+    if !due {
+        return Ok(ScheduledSyncResult {
+            ran: false,
+            next_sync_at: config.next_sync_at,
+            report: None,
+        });
+    }
+
+    let report = run_sync_targets(app.clone(), state, targets).await?;
+    let next_sync_at = {
+        let conn = open_database(&app)?;
+        let next_sync_at = next_sync_time(&conn, config.interval_minutes)?;
+        save_optional_setting(&conn, "sync.next_sync_at", Some(&next_sync_at))?;
+        next_sync_at
+    };
+
+    Ok(ScheduledSyncResult {
+        ran: true,
+        next_sync_at: Some(next_sync_at),
+        report: Some(report),
+    })
 }
 
 #[tauri::command]
@@ -363,17 +419,19 @@ fn load_all_sync_targets(conn: &Connection) -> Result<Vec<FeedSyncTarget>, Strin
 }
 
 fn load_failed_sync_targets(conn: &Connection) -> Result<Vec<FeedSyncTarget>, String> {
+    let retry_limit = parse_i64_setting(setting_value(conn, "sync.retry_limit")?, 3);
     let mut stmt = conn
         .prepare(
             "SELECT f.id, f.title, COALESCE(f.url, '')
              FROM sync_failures sf
              JOIN feeds f ON f.id = sf.feed_id
              WHERE f.id != ?1
+               AND sf.retry_count < ?2
              ORDER BY sf.failed_at ASC",
         )
         .map_err(|error| format!("Failed to prepare failed sync query: {error}"))?;
     let rows = stmt
-        .query_map(params![SAVED_ARTICLES_FEED_ID], feed_target_from_row)
+        .query_map(params![SAVED_ARTICLES_FEED_ID, retry_limit], feed_target_from_row)
         .map_err(|error| format!("Failed to query failed sync feeds: {error}"))?;
 
     rows.collect::<Result<Vec<_>, _>>()
@@ -509,4 +567,18 @@ fn next_sync_time(conn: &Connection, interval_minutes: i64) -> Result<String, St
         |row| row.get(0),
     )
     .map_err(|error| format!("Failed to compute next sync time: {error}"))
+}
+
+fn sync_is_due(conn: &Connection, next_sync_at: Option<&str>) -> Result<bool, String> {
+    let Some(next_sync_at) = next_sync_at.filter(|value| !value.trim().is_empty()) else {
+        return Ok(true);
+    };
+
+    conn.query_row(
+        "SELECT CASE WHEN strftime('%s', 'now') >= strftime('%s', ?1) THEN 1 ELSE 0 END",
+        params![next_sync_at],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value == 1)
+    .map_err(|error| format!("Failed to check scheduled sync time: {error}"))
 }

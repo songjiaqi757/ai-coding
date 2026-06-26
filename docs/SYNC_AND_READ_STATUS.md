@@ -18,15 +18,16 @@ get_sync_status() -> Result<SyncStatus, String>
 retry_failed_syncs() -> Result<SyncReport, String>
 get_sync_config() -> Result<SyncConfig, String>
 update_sync_config(enabled: bool, interval_minutes: i64, retry_limit: i64) -> Result<SyncConfig, String>
+run_scheduled_sync() -> Result<ScheduledSyncResult, String>
 ```
 
 `start_sync(Some(feed_id))` syncs one ordinary feed. `start_sync(None)` syncs all ordinary feeds in sequence and skips the local Saved Articles feed. A failed feed is recorded and does not stop the rest of the sync run.
 
-`retry_failed_syncs()` only retries feeds currently present in `sync_failures`. A successful retry clears that feed's failure record.
+`retry_failed_syncs()` only retries feeds currently present in `sync_failures` whose retry count is below the configured retry limit. A successful retry clears that feed's failure record.
 
 `get_sync_status()` returns in-memory sync status for UI polling. The status is reset when a new sync starts and is updated after each feed completes.
 
-`get_sync_config()` and `update_sync_config()` persist app-level sync settings in the local `settings` table. This phase stores configuration only; the first UI integration can trigger scheduled syncs while the app is running.
+`get_sync_config()` and `update_sync_config()` persist app-level sync settings in the local `settings` table. When automatic sync is enabled, the frontend periodically calls `run_scheduled_sync()` while the app is running. The backend checks `sync.next_sync_at`, runs `start_sync(None)` behavior when due, and writes the next scheduled timestamp after completion.
 
 ## Person B Article Read Status
 
@@ -53,8 +54,8 @@ Sidebar additions:
 
 Article list additions:
 - Segmented control for all/unread/read filter.
-- Mark All Read button for current feed.
-- Per-article read/unread toggle.
+- Automatic read marking for long and short articles.
+- Read state is persisted locally and survives refresh.
 
 AI features:
 - LLM settings modal (base URL, API key, model name).
@@ -98,7 +99,7 @@ LLM features send article content to the user-configured LLM API endpoint only. 
 
 ## Manual Acceptance
 
-1. Run `cd app && pnpm build` (TypeScript + Vite build).
+1. Run `cd app && npm run build` (TypeScript + Vite build).
 2. Run `cd app/src-tauri && cargo check`.
 3. Start the app and use the existing single Feed refresh button; it should still refresh articles.
 4. Click "Sync All" in sidebar; all ordinary feeds should be synced with progress shown.
@@ -106,5 +107,5 @@ LLM features send article content to the user-configured LLM API endpoint only. 
 6. Click "Retry" on failed feeds bar; only failed feeds should be retried.
 7. Toggle article read/unread status; it should persist after refresh.
 8. Switch between all/unread/read filter; article list should update correctly.
-9. Click "Mark All Read"; current feed's unread count should drop to zero.
+9. Open a short unread article and wait briefly; it should become read without requiring scroll.
 10. Restart the app; sync config and article read states should persist.

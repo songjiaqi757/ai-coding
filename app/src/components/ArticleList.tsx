@@ -10,11 +10,9 @@ type Props = {
   selectedArticleId: string | null;
   isLoading: boolean;
   readFilter: ReadFilter;
-  isUpdatingReadStatus: boolean;
   onSelectArticle: (id: string) => void;
   onReadFilterChange: (filter: ReadFilter) => void;
   onToggleFavorite: (article: Article) => void;
-  onMarkCurrentFeedRead: () => void;
   highlightText: (text: string) => ReactNode;
 };
 
@@ -27,11 +25,9 @@ export function ArticleList({
   selectedArticleId,
   isLoading,
   readFilter,
-  isUpdatingReadStatus,
   onSelectArticle,
   onReadFilterChange,
   onToggleFavorite,
-  onMarkCurrentFeedRead,
   highlightText,
 }: Props) {
   const isZh = appLanguage === "zh";
@@ -51,14 +47,6 @@ export function ArticleList({
             <h2>{isZh ? "文章" : "Articles"}</h2>
             <p>{countLabel}</p>
           </div>
-          <button
-            type="button"
-            className="mark-read-button"
-            onClick={onMarkCurrentFeedRead}
-            disabled={isUpdatingReadStatus || unreadCount === 0}
-          >
-            {isZh ? "全部标为已读" : "Mark all read"}
-          </button>
         </div>
 
         <div className="segmented-control">

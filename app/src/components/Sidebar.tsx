@@ -75,6 +75,17 @@ export function Sidebar({
   }, []);
 
   useEffect(() => {
+    if (isImporting || (!opmlStatus && !opmlError)) return;
+
+    const timer = window.setTimeout(() => {
+      setOpmlStatus(null);
+      setOpmlError(null);
+    }, 8000);
+
+    return () => window.clearTimeout(timer);
+  }, [isImporting, opmlError, opmlStatus]);
+
+  useEffect(() => {
     if (!feedContextMenu) return;
 
     function closeMenu() {
@@ -283,6 +294,8 @@ export function Sidebar({
 
   async function handleExportOpml() {
     try {
+      setOpmlStatus(null);
+      setOpmlError(null);
       const { save } = await import("@tauri-apps/plugin-dialog");
       const filePath = await save({
         defaultPath: "bookibuddy-subscriptions.opml",

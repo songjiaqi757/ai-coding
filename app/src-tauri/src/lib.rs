@@ -34,6 +34,8 @@ pub(crate) const FEED_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 BookiBuddy/0.1 feed-import";
 const ARTICLE_USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const BLOCKED_ARTICLE_PLACEHOLDER_ERROR: &str =
+    "Remote article page returned a browser or blocker placeholder; using feed content instead.";
 pub(crate) const SAVED_ARTICLES_FEED_ID: &str = "saved";
 const SAVED_ARTICLES_FEED_TITLE: &str = "__internal_captured_articles";
 const SAVED_ARTICLES_FEED_URL: &str = "bookibuddy://internal/captured-articles";
@@ -1827,6 +1829,30 @@ fn fallback_html_from_article(article: &Article) -> String {
     format!("<article>{}</article>", blocks.join("\n"))
 }
 
+fn looks_like_blocked_article_placeholder(value: &str) -> bool {
+    let normalized = value
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    normalized.contains("a required part of this site couldn't load")
+        || normalized.contains("a required part of this site couldn’t load")
+        || (normalized.contains("disable any ad blockers")
+            && normalized.contains("try using a different browser"))
+}
+
+fn cleaned_output_looks_blocked(cleaned: &NodeCleanerOutput) -> bool {
+    cleaned
+        .cleaned_markdown
+        .as_deref()
+        .is_some_and(looks_like_blocked_article_placeholder)
+        || cleaned
+            .cleaned_html
+            .as_deref()
+            .is_some_and(looks_like_blocked_article_placeholder)
+}
+
 fn build_reader_document(html: &str, base_url: &str) -> String {
     let cleaned = remove_html_block_case_insensitive(
         &remove_html_block_case_insensitive(html, "script"),
@@ -2168,6 +2194,8 @@ fn save_cleaned_article(
     final_url: Option<&str>,
     cleaned: NodeCleanerOutput,
     cleaner_version: &str,
+    content_fetch_status: &str,
+    content_fetch_error: Option<&str>,
 ) -> Result<(), String> {
     let cleaned_html = normalize_optional_text(cleaned.cleaned_html)
         .ok_or_else(|| "Article cleaner returned empty cleaned_html".to_string())?;
@@ -2187,8 +2215,8 @@ fn save_cleaned_article(
              excerpt = COALESCE(?7, excerpt),
              cleaner_version = ?8,
              content_fetched_at = CURRENT_TIMESTAMP,
-             content_fetch_status = 'cleaned',
-             content_fetch_error = NULL,
+             content_fetch_status = ?10,
+             content_fetch_error = ?11,
              final_url = COALESCE(?9, final_url),
              updated_at = CURRENT_TIMESTAMP
          WHERE id = ?1",
@@ -2201,7 +2229,9 @@ fn save_cleaned_article(
             author,
             excerpt,
             cleaner_version,
-            final_url
+            final_url,
+            content_fetch_status,
+            content_fetch_error
         ],
     )
     .map_err(|error| format!("Failed to save cleaned article: {error}"))?;
@@ -2641,12 +2671,21 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
         .cleaned_html
         .as_ref()
         .is_some_and(|value| looks_like_encoded_html_content(value));
+    let has_blocked_cleaned_content = article
+        .cleaned_markdown
+        .as_ref()
+        .is_some_and(|value| looks_like_blocked_article_placeholder(value))
+        || article
+            .cleaned_html
+            .as_ref()
+            .is_some_and(|value| looks_like_blocked_article_placeholder(value));
     if article
         .cleaned_html
         .as_ref()
         .is_some_and(|value| !value.trim().is_empty())
         && !has_stale_cleaned_html
         && !has_stale_cleaned_markdown
+        && !has_blocked_cleaned_content
     {
         return Ok(article);
     }
@@ -2674,13 +2713,29 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
         (fallback_html, None, article.final_url.clone())
     };
 
-    let cleaned = run_node_cleaner(
+    let mut cleaned = run_node_cleaner(
         &app,
         html_for_cleaning,
         Some(article.url.clone()),
         Some(article.title.clone()),
     )
     .await?;
+    let mut content_fetch_status = "cleaned";
+    let mut content_fetch_error = None;
+
+    if cleaned_output_looks_blocked(&cleaned.output) {
+        let fallback_html = fallback_html_from_article(&article);
+        cleaned = run_node_cleaner(
+            &app,
+            fallback_html,
+            Some(article.url.clone()),
+            Some(article.title.clone()),
+        )
+        .await?;
+        content_fetch_status = "fallback";
+        content_fetch_error = Some(BLOCKED_ARTICLE_PLACEHOLDER_ERROR);
+    }
+
     let conn = open_database(&app)?;
     save_cleaned_article(
         &conn,
@@ -2689,6 +2744,8 @@ async fn clean_article(app: AppHandle, article_id: String) -> Result<Article, St
         final_url.as_deref(),
         cleaned.output,
         cleaned.version,
+        content_fetch_status,
+        content_fetch_error,
     )?;
 
     load_article_by_id(&conn, &article_id)
@@ -2705,6 +2762,10 @@ async fn fetch_and_clean_article(app: AppHandle, url: String) -> Result<Article,
         Some(normalized_url.clone()),
     )
     .await?;
+    if cleaned_output_looks_blocked(&cleaned.output) {
+        return Err(BLOCKED_ARTICLE_PLACEHOLDER_ERROR.to_string());
+    }
+
     let cleaned_html = normalize_optional_text(cleaned.output.cleaned_html)
         .ok_or_else(|| "Article cleaner returned empty cleaned_html".to_string())?;
     let cleaned_markdown = normalize_optional_text(cleaned.output.cleaned_markdown)
@@ -3027,11 +3088,10 @@ fn save_secret_to_keyring(key: &str, value: &str) -> Result<(), String> {
 
 fn migrate_secret_settings(_app: &AppHandle, conn: &Connection) -> Result<(), String> {
     for key in SECRET_SETTING_KEYS {
-        let keyring_value = load_secret_from_keyring(key)?;
         let sqlite_value = load_setting_value(conn, key)?;
 
-        if keyring_value.is_none() {
-            if let Some(value) = sqlite_value.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(value) = sqlite_value.as_ref().filter(|value| !value.trim().is_empty()) {
+            if load_secret_from_keyring(key)?.is_none() {
                 save_secret_to_keyring(key, value)?;
             }
         }
@@ -3039,17 +3099,6 @@ fn migrate_secret_settings(_app: &AppHandle, conn: &Connection) -> Result<(), St
         if sqlite_value.is_some() {
             delete_setting_value(conn, key)?;
         }
-    }
-
-    let legacy_value = load_secret_from_keyring("llm_api_key")?;
-    if let Some(legacy_api_key) = legacy_value {
-        if load_secret_from_keyring("llm_summary_api_key")?.is_none() {
-            save_secret_to_keyring("llm_summary_api_key", &legacy_api_key)?;
-        }
-        if load_secret_from_keyring("llm_translation_api_key")?.is_none() {
-            save_secret_to_keyring("llm_translation_api_key", &legacy_api_key)?;
-        }
-        save_secret_to_keyring("llm_api_key", "")?;
     }
 
     Ok(())
@@ -3640,6 +3689,7 @@ pub fn run() {
             sync::start_sync,
             sync::get_sync_status,
             sync::retry_failed_syncs,
+            sync::run_scheduled_sync,
             sync::get_sync_config,
             sync::update_sync_config,
             save_setting,
@@ -3852,6 +3902,15 @@ mod tests {
 
         assert!(super::looks_like_encoded_html_content(broken));
         assert!(!super::looks_like_encoded_html_content(normal));
+    }
+
+    #[test]
+    fn blocked_article_placeholder_detection_matches_browser_error_page() {
+        let blocked = "A required part of this site couldn’t load. This may be due to a browser extension, network issues, or browser settings. Please check your connection, disable any ad blockers, or try using a different browser.";
+        let normal = "This is a normal article paragraph about browser extensions and network settings.";
+
+        assert!(super::looks_like_blocked_article_placeholder(blocked));
+        assert!(!super::looks_like_blocked_article_placeholder(normal));
     }
 
     #[test]

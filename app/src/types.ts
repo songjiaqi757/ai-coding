@@ -58,6 +58,12 @@ export type SyncReport = {
   finishedAt: string;
 };
 
+export type ScheduledSyncResult = {
+  ran: boolean;
+  nextSyncAt: string | null;
+  report: SyncReport | null;
+};
+
 export type AiJobStatus = {
   id: string;
   kind: "summary" | "translation";

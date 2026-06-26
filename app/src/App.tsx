@@ -13,7 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import MarkdownIt from "markdown-it";
 import { Sidebar } from "./components/Sidebar";
 import { ArticleList } from "./components/ArticleList";
-import type { Feed, Article, ReadFilter, UnreadSummary, SyncStatus, Annotation, AppLanguage, AiJobStatus } from "./types";
+import type { Feed, Article, ReadFilter, SyncStatus, Annotation, AppLanguage, AiJobStatus, SyncConfig, ScheduledSyncResult } from "./types";
 import "./App.css";
 
 /* ── Mock data (pure frontend dev — Tauri invoke unavailable) ── */
@@ -523,6 +523,7 @@ function App() {
   const pendingTextSelectionRef = useRef<PendingTextSelection | null>(null);
   const suppressSelectionUntilRef = useRef(0);
   const autoReadMarkedIdsRef = useRef<Set<string>>(new Set());
+  const shortArticleReadTimerRef = useRef<number | null>(null);
   const columnResizeRef = useRef<{
     target: ColumnResizeTarget;
     startX: number;
@@ -566,7 +567,7 @@ function App() {
   const [articleListWidth, setArticleListWidth] = useState(DEFAULT_ARTICLE_LIST_WIDTH);
   const [isReaderFullscreen, setIsReaderFullscreen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [isUpdatingReadStatus, setIsUpdatingReadStatus] = useState(false);
+  const [, setIsUpdatingReadStatus] = useState(false);
   const [isCleaningArticle, setIsCleaningArticle] = useState(false);
   const [isOpeningReaderLink, setIsOpeningReaderLink] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -611,6 +612,7 @@ function App() {
 
   // Sync status
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const scheduledSyncRunningRef = useRef(false);
   const isZh = appLanguage === "zh";
 
   const refreshSyncStatus = useCallback(async () => {
@@ -684,6 +686,40 @@ function App() {
   }, [loadData]);
 
   useEffect(() => {
+    async function maybeRunScheduledSync() {
+      if (scheduledSyncRunningRef.current) return;
+
+      try {
+        const config = await invoke<SyncConfig>("get_sync_config");
+        if (!config.enabled) return;
+
+        scheduledSyncRunningRef.current = true;
+        const result = await invoke<ScheduledSyncResult>("run_scheduled_sync");
+        if (result.ran) {
+          await refreshSyncStatus();
+          await loadData();
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      } finally {
+        scheduledSyncRunningRef.current = false;
+      }
+    }
+
+    const initialTimer = window.setTimeout(() => {
+      void maybeRunScheduledSync();
+    }, 5000);
+    const interval = window.setInterval(() => {
+      void maybeRunScheduledSync();
+    }, 60000);
+
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [loadData, refreshSyncStatus]);
+
+  useEffect(() => {
     let cancelled = false;
     async function loadAppLanguage() {
       try {
@@ -736,17 +772,21 @@ function App() {
     }
   }, []);
 
-  async function handleToggleReadStatus(article: Article) {
+  const handleMarkArticleRead = useCallback(async (article: Article) => {
+    if (article.isRead) return;
     try {
       setIsUpdatingReadStatus(true);
       const updated = await invoke<Article>("set_article_read_status", {
         articleId: article.id,
-        isRead: !article.isRead,
+        isRead: true,
       });
       setArticles((prev) =>
         prev.map((item) =>
           item.id === updated.id ? { ...item, ...updated } : item,
         ),
+      );
+      setReaderArticle((current) =>
+        current?.id === updated.id ? { ...current, ...updated } : current,
       );
       await refreshFeeds();
     } catch (error) {
@@ -754,25 +794,11 @@ function App() {
     } finally {
       setIsUpdatingReadStatus(false);
     }
-  }
-
-  async function handleMarkCurrentFeedRead() {
-    try {
-      setIsUpdatingReadStatus(true);
-      await invoke<UnreadSummary>("mark_articles_read", {
-        feedId: selectedFeedId === "all" ? null : selectedFeedId,
-        articleIds: null,
-      });
-      await loadData();
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setIsUpdatingReadStatus(false);
-    }
-  }
+  }, [refreshFeeds]);
 
   const loadSettings = useCallback(async () => {
     try {
+      setAiError(null);
       const [
         legacyBaseUrl,
         legacyModelName,
@@ -780,8 +806,6 @@ function App() {
         summaryModelName,
         translationBaseUrl,
         translationModelName,
-        summaryApiKeySaved,
-        translationApiKeySaved,
         savedSummaryTargetLang,
         savedTranslationTargetLang,
         savedLanguage,
@@ -792,12 +816,16 @@ function App() {
         invoke<string | null>("load_setting", { key: "llm_summary_model_name" }),
         invoke<string | null>("load_setting", { key: "llm_translation_base_url" }),
         invoke<string | null>("load_setting", { key: "llm_translation_model_name" }),
-        invoke<boolean>("has_secret_setting", { key: "llm_summary_api_key" }),
-        invoke<boolean>("has_secret_setting", { key: "llm_translation_api_key" }),
         invoke<string | null>("load_setting", { key: "llm_summary_target_lang" }),
         invoke<string | null>("load_setting", { key: "llm_translation_target_lang" }),
         invoke<AppLanguage | null>("load_setting", { key: "app_language" }),
       ]);
+      const summaryApiKeySaved = await invoke<boolean>("has_secret_setting", {
+        key: "llm_summary_api_key",
+      });
+      const translationApiKeySaved = await invoke<boolean>("has_secret_setting", {
+        key: "llm_translation_api_key",
+      });
       setSettingsForm({
         summaryBaseUrl: summaryBaseUrl ?? legacyBaseUrl ?? "",
         summaryApiKey: "",
@@ -818,8 +846,8 @@ function App() {
         setTargetLang(savedTranslationTargetLang);
       }
       setSettingsLanguage(savedLanguage === "en" ? "en" : "zh");
-    } catch {
-      // Settings not configured yet
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : String(error));
     }
   }, []);
 
@@ -1178,6 +1206,43 @@ function App() {
     () => locateHighlights(readerSourceHtml, annotations, activeReaderSearchQuery),
     [activeReaderSearchQuery, annotations, readerSourceHtml],
   );
+
+  useEffect(() => {
+    if (shortArticleReadTimerRef.current !== null) {
+      window.clearTimeout(shortArticleReadTimerRef.current);
+      shortArticleReadTimerRef.current = null;
+    }
+
+    if (readerPdfUrl || readerOriginalUrl || !selectedArticle || selectedArticle.isRead) return;
+    if (autoReadMarkedIdsRef.current.has(selectedArticle.id)) return;
+
+    shortArticleReadTimerRef.current = window.setTimeout(() => {
+      const container = isAnnotationDrawerOpen
+        ? readerPaneRef.current
+        : readerContentRef.current;
+      if (!container) return;
+
+      const scrollableHeight = container.scrollHeight - container.clientHeight;
+      if (scrollableHeight > 120) return;
+
+      autoReadMarkedIdsRef.current.add(selectedArticle.id);
+      void handleMarkArticleRead(selectedArticle);
+    }, 1500);
+
+    return () => {
+      if (shortArticleReadTimerRef.current !== null) {
+        window.clearTimeout(shortArticleReadTimerRef.current);
+        shortArticleReadTimerRef.current = null;
+      }
+    };
+  }, [
+    handleMarkArticleRead,
+    isAnnotationDrawerOpen,
+    readerHtml,
+    readerOriginalUrl,
+    readerPdfUrl,
+    selectedArticle,
+  ]);
 
   const bodySearchMatchCount = useMemo(() => {
     if (!readerHtml || !activeReaderSearchQuery) return 0;
@@ -1587,7 +1652,7 @@ function App() {
     if (!reachedBottom && progress < 0.35) return;
 
     autoReadMarkedIdsRef.current.add(selectedArticle.id);
-    void handleToggleReadStatus(selectedArticle);
+    void handleMarkArticleRead(selectedArticle);
   }
 
   function handleReaderContentScroll() {
@@ -1979,11 +2044,9 @@ function App() {
         selectedArticleId={selectedListArticle?.id ?? null}
         isLoading={isLoading}
         readFilter={readFilter}
-        isUpdatingReadStatus={isUpdatingReadStatus}
         onSelectArticle={handleSelectArticle}
         onReadFilterChange={setReadFilter}
         onToggleFavorite={toggleFavorite}
-        onMarkCurrentFeedRead={handleMarkCurrentFeedRead}
         highlightText={(text) => highlightText(text, activeLibrarySearchQuery)}
       />
       <button
@@ -2522,6 +2585,7 @@ function App() {
             <p className="modal-desc">
               {isZh ? "配置 AI 服务、界面语言、翻译目标语言和阅读偏好。" : "Configure the AI provider, app language, translation target, and reading preferences."}
             </p>
+            {aiError && <div className="error-box">{aiError}</div>}
 
             <div className="settings-form">
               <section className="settings-section">
